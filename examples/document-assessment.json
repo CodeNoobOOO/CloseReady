@@ -1,0 +1,25 @@
+{
+  "finding_id": "finding_document_demo",
+  "responsibility": "document_assessment",
+  "case_id": "case_demo_july",
+  "input_state_version": 1,
+  "document_id": "document_june_demo",
+  "requirement_id": "req_july_bank",
+  "result": "needs_correction",
+  "detected_type": "bank_statement",
+  "detected_period": "2026-06",
+  "entity_match": "match",
+  "account_match": "match",
+  "coverage_start": "2026-06-01",
+  "coverage_end": "2026-06-30",
+  "matched_item_refs": [],
+  "uncertainty_reasons": [],
+  "evidence_refs": [
+    {
+      "document_id": "document_june_demo",
+      "page": 1,
+      "excerpt": "Synthetic Demo Client, demo account account_demo. Statement period: 01 June 2026 to 30 June 2026."
+    }
+  ],
+  "issues": ["Document covers June; July is required."]
+}

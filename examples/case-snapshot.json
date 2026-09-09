@@ -1,0 +1,33 @@
+{
+  "case_id": "case_demo_july",
+  "client_id": "client_demo",
+  "accounting_period": "2026-07",
+  "timezone": "Asia/Singapore",
+  "state_version": 1,
+  "readiness_status": "collecting",
+  "owner_user_id": "user_manager_demo",
+  "due_at": "2026-09-15T09:00:00+08:00",
+  "policy_id": "policy_demo",
+  "policy_version": 1,
+  "requirements": [
+    {
+      "requirement_id": "req_july_bank",
+      "document_type": "bank_statement",
+      "accounting_period": "2026-07",
+      "status": "missing",
+      "evidence_refs": [],
+      "reviewer_status": "not_required",
+      "scope": {
+        "entity_id": "entity_demo",
+        "account_ref": "account_demo",
+        "coverage_start": "2026-07-01",
+        "coverage_end": "2026-07-31"
+      },
+      "completion_rule": {
+        "kind": "coverage",
+        "expected_item_refs": [],
+        "allow_multiple_documents": true
+      }
+    }
+  ]
+}

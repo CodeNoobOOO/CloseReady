@@ -1,0 +1,13 @@
+{
+  "finding_id": "finding_reply_demo",
+  "responsibility": "reply_assessment",
+  "case_id": "case_demo_july",
+  "input_state_version": 1,
+  "reply_id": "reply_demo",
+  "intent": "submission_commitment",
+  "requirement_ids": ["req_july_bank"],
+  "promised_at": "2026-09-11T17:00:00+08:00",
+  "needs_clarification": false,
+  "uncertainty_reasons": [],
+  "evidence_excerpt": "I will send the July statement on 11 September 2026 by 5 pm Singapore time."
+}
