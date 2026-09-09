@@ -1,0 +1,11 @@
+{
+  "proposal_id": "proposal_demo",
+  "run_id": "run_demo",
+  "case_id": "case_demo_july",
+  "expected_state_version": 1,
+  "action_type": "apply_document_finding",
+  "requirement_ids": ["req_july_bank"],
+  "finding_ids": ["finding_document_demo"],
+  "reason": "June statement does not satisfy the July requirement.",
+  "payload": {"finding_id": "finding_document_demo"}
+}
