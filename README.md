@@ -3,7 +3,7 @@ Agentic document collection and bookkeeping readiness for accounting firms.
 
 ## Current status
 
-Contract-first project setup targeting a real LLM-powered business workflow. Core Python boundary models now validate cases, requirements, evidence references and action proposals; see [Python model setup and usage](docs/python-models.md). A Python live DeepSeek connectivity/tool-call probe has passed a synthetic round-trip check. No business backend, database, mail integration or deployment exists yet. Fixtures support parallel development and tests; full acceptance still requires persisted business state and actual restricted-recipient mail integration.
+An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. A configurable LLM case-analysis loop reads a checklist and records a validated, assigned unsent draft/review task; DeepSeek has been live-tested. See [backend setup](docs/backend.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, review resolution, reminders, mail transport and deployment remain unimplemented; this is not yet the complete bookkeeping-readiness agent.
 
 ## Python connectivity check
 
@@ -21,7 +21,7 @@ Verified on 2026-09-10: deepseek-flash completed two native Chat Completions req
 
 ## Start here
 
-- [Shared contracts v0.3](docs/contracts.md): data formats, module boundaries, proposed HTTP APIs and validation rules.
+- [Shared contracts v0.5](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
 - [Real LLM runtime](docs/llm-runtime.md): provider adapter, tool loop, errors, live mail and deployment requirements.
 - [Business acceptance](docs/business-acceptance.md): source review, seven rubric areas and business-connected acceptance scenarios.
 - [Synthetic examples](examples/README.md): fixtures for parallel development before integrations exist.

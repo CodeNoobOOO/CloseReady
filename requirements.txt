@@ -1,2 +1,8 @@
 pydantic==2.13.5
 tzdata==2026.3
+fastapi==0.141.1
+starlette==1.6.0
+SQLAlchemy==2.0.52
+greenlet==3.5.5
+uvicorn==0.52.4
+httpx2==2.12.0

@@ -1,0 +1,19 @@
+{
+  "principals": [
+    {
+      "user_id": "user_manager_demo",
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "client_ids": ["client_demo"],
+      "can_manage": true
+    }
+  ],
+  "policies": [
+    {
+      "policy_id": "policy_demo",
+      "version": 1,
+      "client_ids": ["client_demo"],
+      "approved_by": "user_manager_demo",
+      "approved_at": "2026-09-10T00:00:00Z"
+    }
+  ]
+}

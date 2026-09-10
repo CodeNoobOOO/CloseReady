@@ -1,6 +1,6 @@
 # Real LLM runtime and integration contract
 
-Status: business-runtime design, not yet implemented. A separate Python diagnostic in scripts/deepseek_probe.py passed one live DeepSeek native tool-call round trip on 2026-09-10 using deepseek-flash. That diagnostic has no business persistence, scheduling, retries or mail integration and does not fulfil this runtime contract. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
+Status: partially implemented. The first live case-analysis loop now reads persisted checklists, validates proposals and stores assigned unsent draft/review tasks with run/audit records. See [implemented runtime and live check](agent-runtime.md) for limits and evidence. Document/reply assessment, actual communication, asynchronous scheduling and deployment remain outstanding; the full contract below is not yet fulfilled. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
 
 ## Required outcome
 
@@ -9,6 +9,8 @@ The baseline must call an authenticated external LLM API to interpret unfamiliar
 Student 1 owns the provider adapter and bounded tool loop. Student 2 supplies extraction, evidence mappings and document-assessment prompts/contracts. Student 3 supplies reply/drafting prompts, communication tools and mail integration. In baseline mode there is one agent control loop; specialist reasoning loops are enabled only in the candidate multi-agent mode.
 
 ## Configuration and provider adapter
+
+Implemented provider selection and extension instructions are in [LLM providers](llm-providers.md). The runtime depends on LLMProvider; startup chooses deepseek (legacy default) or openai_compatible. Only DeepSeek has live verification in this workspace so far. Canonical business contracts and execution gates are shared across adapters.
 
 Separate runtime environment (development/test/pilot), agent mode (single/multi), LLM backend (live/mock) and mail backend (provider/test_sink). Multi-agent is not synonymous with live operation. Pilot startup must refuse mock inference or a test-only mail sink; missing credentials must fail explicitly, never silently load fixture responses.
 
@@ -42,7 +44,7 @@ Initial semantic decisions are document matching, evidence adequacy, reply inten
 | submit_reply_assessment | Validate and persist reply finding | Evidence record only; does not waive or accept |
 | propose_action | Request a typed business action from contracts.md | Full application gate; result returned to model |
 
-Implement these with executable typed request/response schemas in the selected language, not free-form dictionaries. Action payloads must be discriminated by action_type. The current Markdown and fixtures are design inputs, not runtime schema validation.
+Implement these with executable typed request/response schemas, not free-form dictionaries. Action payloads are now discriminated by action_type in Pydantic. get_case_context and propose_action are implemented for the limited analysis loop; the evidence and assessment tools above remain planned.
 
 ## Live mail and uploaded documents
 
