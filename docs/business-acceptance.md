@@ -4,7 +4,7 @@ Reviewed against the local Problem.docx, judging rubric.docx, plan b.docx and Cl
 
 ## Review conclusion
 
-The original v0.1 correctly separated model judgement from application authority, but was not sufficient to guide business-connected implementation. It omitted a concrete live LLM loop, first-request activation, coverage/item completeness, operational policy records and live integration acceptance. v0.2 addresses those design gaps. Executable schemas, backend code, provider selection, credentials and deployment remain outstanding.
+The original v0.1 correctly separated model judgement from application authority, but was not sufficient to guide business-connected implementation. It omitted a concrete live LLM loop, first-request activation, coverage/item completeness, operational policy records and live integration acceptance. v0.2 addresses those design gaps. Core schemas, a scoped persistent case API and a limited live checklist-analysis loop now exist (contract v0.5). The loop produced a persisted unsent draft in a live synthetic check; document/reply assessment, communication, the complete review workflow and deployment remain outstanding.
 
 The central outcome is fewer manual document-follow-up cycles and accurate client-period readiness. A bank-statement demo is a first scenario, not the entire business model. Requirements must support relevant entities/accounts, full statement coverage, expected items and correction history. A document's displayed month alone is insufficient proof of completeness.
 

@@ -8,7 +8,7 @@ python -m venv .venv
 .venv/Scripts/python -m unittest discover -s tests -v
 ```
 
-On Linux/Lightsail use `.venv/bin/python` instead. No API key or network inference is needed for model tests. This phase installs Pydantic and IANA timezone data; it does not install a web server or database.
+On Linux/Lightsail use `.venv/bin/python` instead. No API key or network inference is needed for model tests. The requirements file now also includes the case API server and persistence/test dependencies; see [backend setup](backend.md).
 
 ```python
 from pathlib import Path
