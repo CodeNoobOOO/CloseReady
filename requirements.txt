@@ -1,0 +1,2 @@
+pydantic==2.13.5
+tzdata==2026.3

@@ -1,8 +1,31 @@
-# CloseReady shared contracts v0.2
+# CloseReady shared contracts v0.3
 
-Status: proposed implementation contract. These endpoints and modules are not implemented yet. Fixtures in `examples/` are synthetic and are not model evaluation results.
+Status: core Python boundary models are implemented in `closeready/models.py`: CaseSnapshot, Requirement, EvidenceRef, ActionContent and ActionProposal. HTTP endpoints, persistence, assessment modules and business execution are not implemented yet. Fixtures in `examples/` are synthetic and are not model evaluation results.
 
-The deliverable must use a real LLM API and persisted business state. Fixtures only unblock parallel development and deterministic tests; they are not the agent implementation. See [LLM runtime](llm-runtime.md) for provider integration and [business acceptance](business-acceptance.md) for source alignment and pilot gates. No application or provider connection has been implemented yet.
+The deliverable must use a real LLM API and persisted business state. Fixtures only unblock parallel development and deterministic tests; they are not the agent implementation. See [LLM runtime](llm-runtime.md) for provider integration and [business acceptance](business-acceptance.md) for source alignment and pilot gates. A standalone DeepSeek connectivity probe has passed; the business runtime remains outstanding.
+
+## v0.3 implementation clarifications
+
+- `description` is optional and nullable on Requirement, but required and nonblank for other_supporting_document. Its completion_rule supplies the configured acceptance rule. Existing v0.2 fixtures remain valid.
+- Requirement accounting_period must equal its case period. Coverage dates must be a complete ordered pair; coverage rules require them. Coverage rules use an empty expected_item_refs list; explicit_items requires unique nonempty references.
+- Unknown fields are rejected, including arbitrary recipients in message drafts. Versions and page numbers are strict positive integers (not booleans or numeric strings). Parsed timestamps require timezone information and normalize to UTC.
+- ActionContent is the model-facing discriminated union, without proposal_id, run_id, case_id or expected_state_version. The application binds these trusted fields to create ActionProposal. Neither schema authenticates the caller.
+- Frozen models prevent field reassignment, but nested lists remain mutable. Revalidate serialized records at trust boundaries; do not use model_construct or unvalidated model_copy for external data.
+- Structural readiness checks reject empty/unresolved checklists. Database evidence, actor permissions, stale versions, independent review blockers, and actual human confirmation still require the future execution gate.
+
+Exact payload shapes (all fields required):
+
+| action_type | payload |
+| --- | --- |
+| apply_document_finding | finding_id |
+| record_commitment | finding_id, promised_at |
+| request_documents | subject, body, requirement_ids |
+| request_clarification | subject, body, requirement_ids |
+| schedule_reminder | scheduled_at, draft: {subject, body, requirement_ids} |
+| create_review_task | issue, evidence_refs: list of EvidenceRef |
+| no_action | {} |
+
+Payload finding_id must be included in envelope finding_ids. Draft requirement_ids must match the action requirement_ids without duplicates. Case membership and semantic evidence support are checked by the execution gate, not these standalone records.
 
 ## Ownership
 
