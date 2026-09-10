@@ -1,6 +1,6 @@
 # Real LLM runtime and integration contract
 
-Status: implementation design, not implemented or live-tested. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
+Status: business-runtime design, not yet implemented. A separate Python diagnostic in scripts/deepseek_probe.py passed one live DeepSeek native tool-call round trip on 2026-09-10 using deepseek-flash. That diagnostic has no business persistence, scheduling, retries or mail integration and does not fulfil this runtime contract. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
 
 ## Required outcome
 
