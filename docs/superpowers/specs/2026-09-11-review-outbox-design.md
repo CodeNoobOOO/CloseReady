@@ -31,7 +31,7 @@ Requirement acceptance, waiver, document review, readiness confirmation, contact
 The guard validates `MessageDraft.subject` and `MessageDraft.body` before a model-produced draft is stored and again before an approved draft is placed in the outbox. It rejects:
 
 - internal identifier tokens with the prefixes `case_`, `req_`, `run_`, `review_`, `event_`, or `proposal_`, case-insensitively;
-- URI schemes other than `https:` and `mailto:` in visible text;
+- URL-like `scheme://` values other than `https://`, and executable schemes such as `javascript:`, `data:`, `file:`, or `vbscript:`; `mailto:` remains allowed;
 - Unicode control characters other than newline, carriage return, and tab;
 - a subject longer than 200 characters or a body longer than 10,000 characters.
 
