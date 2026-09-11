@@ -160,7 +160,7 @@ git commit -m "Enforce customer-visible draft safety"
 - Produces: `RuntimeStore.decide_review(actor, case_id, request, key) -> ReviewTaskRecord`
 - Produces: `RuntimeStore.outbox_records(actor, case_id, cursor=None, limit=50) -> OutboxPage`
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 ```python
 def test_edit_requires_draft_and_other_decisions_forbid_it(self):
@@ -172,13 +172,13 @@ def test_edit_requires_draft_and_other_decisions_forbid_it(self):
             'edited_draft': {'subject': 'Safe', 'body': 'Safe', 'requirement_ids': ['req_1']}})
 ```
 
-- [ ] **Step 2: Run the schema test and verify RED**
+- [x] **Step 2: Run the schema test and verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox.ReviewOutboxTests.test_edit_requires_draft_and_other_decisions_forbid_it -v`
 
 Expected: import failure because the review-decision models do not exist.
 
-- [ ] **Step 3: Add lifecycle and outbox models**
+- [x] **Step 3: Add lifecycle and outbox models**
 
 ```python
 class ReviewDecisionRequest(ContractModel):
@@ -227,13 +227,13 @@ class OutboxPage(ContractModel):
 
 Add a model validator to `ReviewTaskRecord` requiring all resolution fields to be null while open and requiring resolution, actor, timestamp, and reason while resolved. `approved_draft` is required only for approved resolutions.
 
-- [ ] **Step 4: Run schema tests and verify GREEN**
+- [x] **Step 4: Run schema tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox.ReviewOutboxTests.test_edit_requires_draft_and_other_decisions_forbid_it -v`
 
 Expected: pass.
 
-- [ ] **Step 5: Write failing store tests for approve, edit, reject, and dismiss**
+- [x] **Step 5: Write failing store tests for approve, edit, reject, and dismiss**
 
 Create a real case and review task through the scripted runtime. Assert:
 
@@ -250,13 +250,13 @@ self.assertEqual(db.outbox_records(actor, case.case_id).items[0].delivery_status
 
 Add equivalent cases proving edited content is stored, rejection creates no outbox, and an operational task without a draft can only be dismissed.
 
-- [ ] **Step 6: Run store tests and verify RED**
+- [x] **Step 6: Run store tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox -v`
 
 Expected: failures because tables and store methods do not exist.
 
-- [ ] **Step 7: Add outbox and review-decision tables**
+- [x] **Step 7: Add outbox and review-decision tables**
 
 ```python
 outbox = Table('mail_outbox', runtime_metadata,
@@ -272,7 +272,7 @@ review_responses = Table('review_idempotent_responses', runtime_metadata,
     Column('response', Text, nullable=False))
 ```
 
-- [ ] **Step 8: Implement transactional decision and scoped listing**
+- [x] **Step 8: Implement transactional decision and scoped listing**
 
 `decide_review` must, inside `Store.write()`:
 
@@ -295,7 +295,7 @@ resolution = {
 }[request.decision]
 ```
 
-- [ ] **Step 9: Add failure, replay, concurrency, compatibility, and restart tests**
+- [x] **Step 9: Add failure, replay, concurrency, compatibility, and restart tests**
 
 Tests must assert:
 
@@ -311,7 +311,7 @@ legacy open task JSON         -> lifecycle defaults load successfully
 new Store/RuntimeStore        -> resolved task, outbox, replay survive restart
 ```
 
-- [ ] **Step 10: Run all review/outbox and runtime tests and commit**
+- [x] **Step 10: Run all review/outbox and runtime tests and commit**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox tests.test_runtime -v`
 
