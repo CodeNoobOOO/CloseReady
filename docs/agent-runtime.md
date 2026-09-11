@@ -1,6 +1,6 @@
 # First live case-analysis loop
 
-This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). It reads the persisted checklist and can generate a guarded unsent request draft or an assigned human review task. Assigned managers can now resolve communication/error tasks, and approval creates a durable reviewed outbox record. It cannot yet assess uploaded documents, interpret replies, resolve contacts, send mail, schedule follow-ups or confirm readiness.
+This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). An authorised activation persists a queued run, and a separate worker reads the checklist and can generate a guarded unsent request draft or an assigned human review task. Assigned managers can resolve communication/error tasks, and approval creates a durable reviewed outbox record. It cannot yet assess uploaded documents, interpret replies, resolve contacts, send mail, schedule follow-ups or confirm readiness.
 
 ## Enable it locally
 
@@ -13,20 +13,28 @@ $env:DEEPSEEK_MODEL = 'deepseek-flash'
 .venv/Scripts/python -m uvicorn closeready.api:from_env --factory --host 127.0.0.1 --port 8000
 ```
 
+Start a second terminal with the same environment and run:
+
+```powershell
+.venv/Scripts/python -m closeready.worker
+```
+
+Use `--once` to recover expired work and process at most one queued run before exiting. The continuous worker polls every two seconds by default; `--poll-seconds` accepts 0.1 through 60.
+
 For the DeepSeek example above, keep DEEPSEEK_API_KEY in the ignored .env. For a different provider use the LLM_* settings in the provider guide. Environment variables override the same variable names in the file. The optional parser supports plain or quoted KEY=value lines, not interpolation or inline comments. Endpoint validation belongs to the selected adapter; redirects are always refused. Missing/invalid configuration with LLM_ENABLED=1 fails startup; with LLM disabled, case CRUD remains available and starting analysis returns 503. There is no production mock-provider selector or fixture fallback.
 
 In the terminal holding your local API token and $createdCase from the backend guide:
 
 ```powershell
 $currentCase = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)" -Headers $apiHeaders
-$apiHeaders['Idempotency-Key'] = 'analysis-demo-1'
+$apiHeaders['Idempotency-Key'] = 'activation-demo-1'
 $analysisBody = @{ expected_state_version = $currentCase.state_version } | ConvertTo-Json
-$run = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/runs" -Headers $apiHeaders -ContentType 'application/json' -Body $analysisBody
+$run = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/activate" -Headers $apiHeaders -ContentType 'application/json' -Body $analysisBody
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/runs/$($run.run_id)" -Headers $apiHeaders
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/review-tasks" -Headers $apiHeaders
 ```
 
-POST /cases/{case_id}/runs is synchronous and returns 200 with a run record, including failed/needs_review/stale outcomes. HTTP 200 means a run record was returned, not that the analysis succeeded. It is deliberately separate from the planned /activate endpoint: it does not initiate a client communication. All paths have prefix /api/v1. Starting analysis requires a manager grant and Idempotency-Key.
+POST /cases/{case_id}/activate returns 202 with a queued run and does not call the model in the request. The worker processes it independently, so poll GET /runs/{run_id}. Activation starts analysis for an initial request but does not send client communication. POST /cases/{case_id}/runs remains a synchronous diagnostic route returning 200 with the terminal/current run record. All paths have prefix /api/v1 and mutation requests require a manager grant plus Idempotency-Key.
 
 ## What is implemented
 
@@ -54,7 +62,7 @@ $apiHeaders['Idempotency-Key'] = 'recover-demo-1'
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/runs/$($run.run_id)/recover" -Headers $apiHeaders
 ```
 
-Recovery requires a manager with case access. It marks expired running (or explicitly abandoned queued) work needs_review and ensures one assigned task for that run. It does not resend, rerun inference or erase committed effects. The transition is intrinsically idempotent; repeating recovery on a terminal run has no effect. Active leases return 409. A recovered worker cannot subsequently apply a proposal with its old claim. There is no background recovery worker in this increment.
+Recovery requires the run's configured manager with case access. The worker scans expired running work before claiming another queued run; manual recovery remains available. Recovery marks interrupted work needs_review and ensures one assigned task for that run. It does not resend, rerun inference or erase committed effects. The transition is intrinsically idempotent; repeating recovery on a terminal run has no effect. Active leases return 409. A recovered worker cannot subsequently apply a proposal with its old claim.
 
 Review tasks expose cursor pagination (limit 1..100), reason, optional draft, resolution metadata and fixed sent=false. The assigned manager can approve, edit and approve, reject, or dismiss an operational-error task through the authenticated review-decisions endpoint. Approval creates one durable `pending_reviewed_delivery` outbox record with `delivery_status=not_attempted`; it does not resolve a recipient or send mail. New analysis with a new key is a new explicit operation and may create another review task; deduplication across distinct business events is still required before a pilot.
 

@@ -1,6 +1,6 @@
 # Case API: local development
 
-The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An optional [live analysis loop](agent-runtime.md) calls a configured provider and stores guarded draft/review tasks. Assigned managers can resolve these tasks; approving a draft creates a durable reviewed outbox record. It does not activate client communication, resolve a recipient, send mail, accept documents or confirm readiness.
+The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An authorised activation persists a queued run for the separate [agent worker](agent-runtime.md), which calls a configured provider and stores guarded draft/review tasks. Assigned managers can resolve these tasks; approving a draft creates a durable reviewed outbox record. Activation does not itself communicate with a client, resolve a recipient, send mail, accept documents or confirm readiness.
 
 ## Setup on Windows
 
@@ -90,6 +90,7 @@ Stop and restart the server using the same database URL: the case, version, audi
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
+| POST /api/v1/cases/{case_id}/activate | Persist case_activated event and queued run; 202 | Manager with client grant; configured provider |
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages; no delivery claim | Actor with client grant |
@@ -116,4 +117,4 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-For Lightsail, use `.venv/bin/python` and an absolute persistent database path. This API has not been deployed: keep local development bound to loopback until TLS, secret provisioning, access logging, resource limits, backups and deployment tests are in place. The analysis runtime adds durable events and a limited action gate; a complete runtime still needs evidence ownership/verification, human review resolution, reminder reconciliation, mail integration and asynchronous worker recovery.
+For Lightsail, use `.venv/bin/python` and an absolute persistent database path. Run the API and `python -m closeready.worker` as separately supervised services against the same absolute database URL. This API has not been deployed: keep local development bound to loopback until TLS, secret provisioning, access logging, resource limits, backups and deployment tests are in place. The runtime now queues and recovers analysis work, but a complete business workflow still needs evidence ownership/verification, reminder reconciliation and mail integration.

@@ -43,9 +43,26 @@ class AgentRuntime:
     def analyse(self, actor, case_id, expected_version, key):
         run = self.db.start(actor, case_id, expected_version, key, self.provider.provider_name,
             self.provider.model, self.provider.live)
+        return self.execute(actor, run.run_id)
+
+    def execute(self, actor, run_id):
+        run = self.db.get_run(actor, run_id)
+        if run.status != 'queued':
+            return run
         token = self.db.claim(actor, run.run_id)
         if token is None:
             return self.db.get_run(actor, run.run_id)
+        return self.execute_claimed(actor, run.run_id, token)
+
+    def execute_claimed(self, actor, run_id, token):
+        run = self.db.get_run(actor, run_id)
+        if (run.provider, run.model, run.live) != (
+                self.provider.provider_name, self.provider.model, self.provider.live):
+            return self.db.finish(actor, run.run_id, token, 'needs_review',
+                'PROVIDER_CONFIGURATION_CHANGED')
+        return self._execute_claimed(actor, run, token)
+
+    def _execute_claimed(self, actor, run, token):
         messages = [{'role': 'system', 'content': INSTRUCTIONS},
             {'role': 'user', 'content': 'Analyse the authorised case and record the next appropriate action.'}]
         loaded_version, decision, repairs, retries = None, None, 0, 0

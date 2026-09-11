@@ -1,6 +1,15 @@
-# CloseReady shared contracts v0.6
+# CloseReady shared contracts v0.7
 
-Status: core models, case API, a limited live analysis runtime, communication-review decisions and a durable reviewed-message outbox are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and explicit recovery. Document/reply assessment, contact resolution and communication delivery remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions and a reviewed-message outbox are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Document/reply assessment, contact resolution and communication delivery remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md) and [runtime details](agent-runtime.md).
+
+## v0.7 durable activation and worker increment
+
+- `POST /api/v1/cases/{case_id}/activate` accepts `{expected_state_version}` plus `Idempotency-Key`, persists a `case_activated` event and queued run, and returns 202 without calling the provider in the HTTP request.
+- A separate `python -m closeready.worker` process claims queued work and executes the existing bounded LLM loop. `--once` performs recovery and processes at most one queued run for deployment checks.
+- Run creation, event creation and the `activate_case` audit record commit atomically. Activation does not change the case version or imply that a client message was queued or sent.
+- Multiple workers may observe a run, but the SQLite claim permits one executor. Expired running work becomes `needs_review` with `INTERRUPTED_RUN`; inference is not replayed automatically.
+- The worker resolves the original manager from trusted configuration. Removed identities are not replaced with broader authority. A provider/model/live-mode mismatch becomes `needs_review` with `PROVIDER_CONFIGURATION_CHANGED`.
+- The synchronous `POST /cases/{case_id}/runs` diagnostic remains compatible. Product flows should use activation and the supervised worker.
 
 ## v0.6 review and outbox increment
 
@@ -188,7 +197,7 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, run retri
 | GET /cases | List authorised cases; optional cursor | 200: items and next_cursor |
 | POST /cases | Create a client-period case from explicit requirements | 201: case snapshot |
 | GET /cases/{case_id} | Case details | 200: case snapshot |
-| POST /cases/{case_id}/activate | Authorised initial-request activation with expected_state_version | 202: event_id, run_id |
+| POST /cases/{case_id}/activate | Queue authorised initial-request analysis with expected_state_version | 202: queued RunRecord |
 | POST /cases/{case_id}/documents | Multipart file upload with optional requirement_id | 202: document_id, event_id, run_id |
 | GET /runs/{run_id} | Poll processing | 200: run record |
 | GET /cases/{case_id}/findings | Evidence assessments | 200: items and next_cursor |
