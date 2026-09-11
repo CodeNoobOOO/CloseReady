@@ -1,0 +1,87 @@
+"""Durable single-iteration worker for queued agent runs."""
+import argparse
+import logging
+import os
+import time
+
+from .config import load_access_config
+from .provider_factory import provider_from_environment
+from .runtime import AgentRuntime
+from .runtime_store import RuntimeStore
+from .store import Store
+
+
+logger = logging.getLogger(__name__)
+
+
+class AgentWorker:
+    def __init__(self, runtime_store, provider, access):
+        self.runtime_store = runtime_store
+        self.provider = provider
+        self.access = access
+
+    def _actor(self, actor_id, client_id):
+        return next((principal for principal in self.access.principals
+            if principal.user_id == actor_id and principal.can_manage
+            and client_id in principal.client_ids), None)
+
+    def run_once(self):
+        for run_id, _actor_id in self.runtime_store.expired_run_candidates():
+            self.runtime_store.recover_expired_system(run_id)
+
+        for run_id, actor_id, client_id in self.runtime_store.queued_candidates():
+            actor = self._actor(actor_id, client_id)
+            if actor is None:
+                logger.error('ACTOR_CONFIGURATION_MISSING: queued run was not executed.')
+                continue
+            token = self.runtime_store.claim(actor, run_id)
+            if token is None:
+                continue
+            return AgentRuntime(self.runtime_store, self.provider).execute_claimed(
+                actor, run_id, token)
+        return None
+
+
+def worker_from_environment():
+    path = os.environ.get('CLOSEREADY_ACCESS_CONFIG')
+    database_url = os.environ.get('CLOSEREADY_DATABASE_URL')
+    if not path or not database_url:
+        raise RuntimeError(
+            'Set CLOSEREADY_ACCESS_CONFIG and CLOSEREADY_DATABASE_URL; see docs/backend.md.')
+    if os.environ.get('CLOSEREADY_LLM_ENABLED') != '1':
+        raise RuntimeError('Set CLOSEREADY_LLM_ENABLED=1 for the agent worker.')
+    access = load_access_config(path)
+    store = Store(database_url, access)
+    return AgentWorker(RuntimeStore(store), provider_from_environment(), access)
+
+
+def polling_seconds(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError('Polling interval must be a number.') from None
+    if not 0.1 <= seconds <= 60:
+        raise argparse.ArgumentTypeError('Polling interval must be between 0.1 and 60 seconds.')
+    return seconds
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Process durable CloseReady agent runs.')
+    parser.add_argument('--once', action='store_true',
+        help='Process recovery and at most one queued run, then exit.')
+    parser.add_argument('--poll-seconds', type=polling_seconds, default=2.0)
+    args = parser.parse_args(argv)
+    worker = worker_from_environment()
+    try:
+        while True:
+            result = worker.run_once()
+            if args.once:
+                return 0
+            if result is None:
+                time.sleep(args.poll_seconds)
+    finally:
+        worker.runtime_store.store.engine.dispose()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

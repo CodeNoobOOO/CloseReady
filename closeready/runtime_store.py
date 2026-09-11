@@ -13,6 +13,7 @@ from .runtime_models import (
     OutboxPage, OutboxRecord, ReviewDecisionRequest, ReviewTaskPage,
     ReviewTaskRecord, RunRecord,
 )
+from .config import Principal
 from .store import DomainError, Store, cases, forbidden
 
 runtime_metadata = MetaData()
@@ -67,6 +68,45 @@ class RuntimeStore:
     def get_run(self, actor, run_id):
         with self.store.engine.connect() as conn:
             return self._record(conn, self._row(conn, actor, run_id))
+
+    def expired_run_candidates(self):
+        with self.store.engine.connect() as conn:
+            rows = conn.execute(select(runs.c.run_id, runs.c.actor_id).where(
+                runs.c.status == 'running',
+                runs.c.lease_until <= int(time.time())).order_by(runs.c.run_id)).all()
+        return [(row.run_id, row.actor_id) for row in rows]
+
+    def queued_candidates(self):
+        with self.store.engine.connect() as conn:
+            rows = conn.execute(select(
+                runs.c.run_id, runs.c.actor_id, cases.c.client_id
+            ).select_from(runs.join(cases, runs.c.case_id == cases.c.case_id)).where(
+                runs.c.status == 'queued').order_by(runs.c.run_id)).all()
+        return [(row.run_id, row.actor_id, row.client_id) for row in rows]
+
+    def recover_expired_system(self, run_id):
+        with self.store.write() as conn:
+            row = conn.execute(select(runs).where(
+                runs.c.run_id == run_id)).mappings().one_or_none()
+            if row is None:
+                return None
+            if row['status'] != 'running':
+                return self._record(conn, row)
+            if row['lease_until'] > time.time():
+                raise DomainError('RUN_ACTIVE', 'Run still has an active claim.', 409)
+            raw_case = conn.execute(select(cases.c.snapshot).where(
+                cases.c.case_id == row['case_id'])).scalar_one_or_none()
+            if raw_case is None:
+                raise DomainError('NOT_FOUND', 'Case not found.', 404)
+            case = CaseSnapshot.model_validate_json(raw_case)
+            system_actor = Principal(user_id='system_worker', token_sha256='0' * 64,
+                client_ids=frozenset({case.client_id}), can_manage=True)
+            self._review(conn, system_actor, row, case, 'INTERRUPTED_RUN', [])
+            self._set(conn, row, 'needs_review', 'INTERRUPTED_RUN',
+                claim_token=None, lease_until=None)
+            changed = conn.execute(select(runs).where(
+                runs.c.run_id == run_id)).mappings().one()
+            return self._record(conn, changed)
 
     def review_tasks(self, actor, case_id, cursor=None, limit=50):
         with self.store.engine.connect() as conn:
@@ -177,7 +217,8 @@ class RuntimeStore:
             raise error
         return resolved
 
-    def start(self, actor, case_id, version, key, provider, model, live):
+    def start(self, actor, case_id, version, key, provider, model, live,
+              event_type='case_analysis_requested', audit_action='request_case_analysis'):
         with self.store.write() as conn:
             case = self.store._case(conn, actor, case_id)
             if not actor.can_manage:
@@ -199,11 +240,11 @@ class RuntimeStore:
                 start_state_version=version, status='queued', started_at=None, finished_at=None,
                 provider=provider, model=model, live=live)
             conn.execute(insert(events).values(event_id=event_id, case_id=case_id, record=json.dumps({
-                'type': 'case_analysis_requested', 'occurred_at': now(), 'case_id': case_id,
+                'type': event_type, 'occurred_at': now(), 'case_id': case_id,
                 'actor_user_id': actor.user_id, 'expected_state_version': version})))
             conn.execute(insert(runs).values(run_id=run_id, case_id=case_id, actor_id=actor.user_id,
                 key=key, expected_version=version, status='queued', record=record.model_dump_json()))
-            self.store._audit(conn, actor, 'request_case_analysis', 'queued', 'Analysis event recorded.',
+            self.store._audit(conn, actor, audit_action, 'queued', 'Analysis event recorded.',
                 case, old=version, new=version, event_id=event_id, run_id=run_id)
         return record
 

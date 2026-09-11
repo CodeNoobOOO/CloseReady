@@ -1,6 +1,6 @@
 # Real LLM runtime and integration contract
 
-Status: partially implemented. The first live case-analysis loop now reads persisted checklists, validates proposals and stores assigned unsent draft/review tasks with run/audit records. See [implemented runtime and live check](agent-runtime.md) for limits and evidence. Document/reply assessment, actual communication, asynchronous scheduling and deployment remain outstanding; the full contract below is not yet fulfilled. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
+Status: partially implemented. Durable activation now queues work for a separately supervised worker; the live case-analysis loop reads persisted checklists, validates proposals and stores assigned unsent draft/review tasks with run/audit records. See [implemented runtime and live check](agent-runtime.md) for limits and evidence. Document/reply assessment, actual communication, reminder scheduling and deployment remain outstanding; the full contract below is not yet fulfilled. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
 
 ## Required outcome
 

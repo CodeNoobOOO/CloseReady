@@ -1,4 +1,4 @@
-"""Live synthetic API-to-LLM-to-database check; consumes provider credit, sends no mail.
+"""Live synthetic activation-to-worker check; consumes provider credit, sends no mail.
 
 Run from repository root: python -m scripts.live_case_analysis --model deepseek-flash
 """
@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from closeready.api import create_app
 from closeready.config import AccessConfig
 from closeready.provider_factory import provider_from_environment
+from closeready.worker import AgentWorker
 
 
 def main():
@@ -42,12 +43,17 @@ def main():
         if created.status_code != 201:
             raise RuntimeError('Synthetic case creation failed.')
         case = created.json()
-        headers['Idempotency-Key'] = 'analyse-live'
-        response = client.post('/api/v1/cases/' + case['case_id'] + '/runs',
+        headers['Idempotency-Key'] = 'activate-live'
+        response = client.post('/api/v1/cases/' + case['case_id'] + '/activate',
             json={'expected_state_version': 1}, headers=headers)
-        if response.status_code != 200:
-            raise RuntimeError('Analysis API failed; no success claimed.')
-        run = response.json()
+        if response.status_code != 202 or response.json()['status'] != 'queued':
+            raise RuntimeError('Activation API failed; no success claimed.')
+        queued = response.json()
+        processed = AgentWorker(
+            client.app.state.runtime_store, provider, access).run_once()
+        if processed is None or processed.run_id != queued['run_id']:
+            raise RuntimeError('Worker did not claim the activated run; no success claimed.')
+        run = client.get('/api/v1/runs/' + queued['run_id'], headers=headers).json()
         tasks = client.get('/api/v1/cases/' + case['case_id'] + '/review-tasks', headers=headers).json()['items']
         after = client.get('/api/v1/cases/' + case['case_id'], headers=headers).json()
         expected = {r['requirement_id'] for r in case['requirements']}
@@ -55,7 +61,18 @@ def main():
             and tasks[0]['draft'] is not None and not tasks[0]['sent']
             and set(tasks[0]['requirement_ids']) == expected and after['state_version'] == 2
             and all(r['status'] == 'missing' for r in after['requirements']))
-        summary = {'passed': passed, 'live': run['live'], 'provider': run['provider'], 'model': run['model'], 'run_id': run['run_id'],
+    with TestClient(create_app(url, access)) as restarted:
+        persisted_run = restarted.get('/api/v1/runs/' + queued['run_id'], headers=headers)
+        persisted_tasks = restarted.get(
+            '/api/v1/cases/' + case['case_id'] + '/review-tasks', headers=headers)
+        restart_verified = (persisted_run.status_code == 200
+            and persisted_run.json()['status'] == run['status']
+            and persisted_tasks.status_code == 200
+            and len(persisted_tasks.json()['items']) == len(tasks))
+        passed = passed and restart_verified
+        summary = {'passed': passed, 'execution_mode': 'durable_worker',
+            'restart_verified': restart_verified, 'live': run['live'],
+            'provider': run['provider'], 'model': run['model'], 'run_id': run['run_id'],
             'run_status': run['status'], 'error_code': run['error_code'], 'inference_attempts': len(run['traces']),
             'usage': [t['usage'] for t in run['traces']], 'review_task_count': len(tasks),
             'mail_sent': False, 'database_path': str(root / 'cases.db')}

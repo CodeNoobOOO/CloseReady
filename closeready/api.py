@@ -38,6 +38,7 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
 
     app = FastAPI(title='CloseReady Case API', version='0.1.0', lifespan=lifespan)
     app.state.store = store
+    app.state.runtime_store = runtime_store
     bearer = HTTPBearer(auto_error=False)
 
     def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> Principal:
@@ -109,6 +110,19 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
         if provider is None:
             raise DomainError('LLM_UNAVAILABLE', 'Live LLM configuration is not enabled.', 503)
         return AgentRuntime(runtime_store, provider).analyse(actor, case_id, body.expected_state_version, key)
+
+    @app.post('/api/v1/cases/{case_id}/activate', response_model=RunRecord, status_code=202)
+    def activate_case(case_id: str, body: AnalyseRequest, actor: Actor, key: Key):
+        store.get_case(actor, case_id)
+        if not actor.can_manage:
+            raise DomainError('FORBIDDEN', 'Activation requires a manager.', 403)
+        if provider is None:
+            raise DomainError('LLM_UNAVAILABLE', 'Live LLM configuration is not enabled.', 503)
+        if not provider.live:
+            raise DomainError('LIVE_LLM_REQUIRED', 'Case activation requires a live LLM provider.', 503)
+        return runtime_store.start(actor, case_id, body.expected_state_version,
+            'activate|' + key, provider.provider_name, provider.model, provider.live,
+            event_type='case_activated', audit_action='activate_case')
 
     @app.get('/api/v1/runs/{run_id}', response_model=RunRecord)
     def get_run(run_id: str, actor: Actor):
