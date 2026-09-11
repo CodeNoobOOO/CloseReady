@@ -1,5 +1,6 @@
 """Review decisions authorize durable work; they never send mail."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,15 +9,17 @@ import unittest
 from pydantic import ValidationError
 from sqlalchemy import text, update
 from sqlalchemy.exc import SQLAlchemyError
+from fastapi.testclient import TestClient
 
+from closeready.api import create_app
 from closeready.case_requests import CreateCaseRequest
 from closeready.llm import ProviderError
 from closeready.runtime import AgentRuntime
 from closeready.runtime_models import ReviewDecisionRequest, ReviewTaskRecord
 from closeready.runtime_store import RuntimeStore, reviews
 from closeready.store import DomainError, Store
-from closeready.config import Principal
-from test_case_api import access_config, case_request
+from closeready.config import AccessConfig, Principal
+from test_case_api import access_config, case_request, OTHER_TOKEN, TOKEN
 from test_runtime import ScriptedProvider, final, tool
 
 
@@ -254,6 +257,91 @@ class ReviewOutboxStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_case(self.actor, self.case.case_id).state_version, 2)
         self.assertEqual(self.db.review_tasks(self.actor, self.case.case_id).items[0].status, 'open')
         self.assertEqual(self.db.outbox_records(self.actor, self.case.case_id).items, [])
+
+
+READER_TOKEN = 'read-only-synthetic-token'
+
+
+class ReviewOutboxHttpTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.url = 'sqlite:///' + (Path(self.tmp.name) / 'http-review.db').as_posix()
+        config = access_config().model_dump(mode='json')
+        config['principals'].append({'user_id': 'reader',
+            'token_sha256': hashlib.sha256(READER_TOKEN.encode()).hexdigest(),
+            'client_ids': ['client_demo'], 'can_manage': False})
+
+        def propose_from_context(messages):
+            context = json.loads(messages[-1]['content'])['case']
+            rid = context['requirements'][0]['requirement_id']
+            return tool('propose_action', {'action': {'action_type': 'request_documents',
+                'requirement_ids': [rid], 'finding_ids': [], 'reason': 'The statement is missing.',
+                'payload': {'subject': 'July statement',
+                            'body': 'Please upload the complete July statement.',
+                            'requirement_ids': [rid]}}}, 'http-draft')
+
+        provider = ScriptedProvider([tool('get_case_context', {}), propose_from_context, final()])
+        self.client = TestClient(create_app(self.url, AccessConfig.model_validate(config), provider=provider))
+        self.client.__enter__()
+        self.headers = {'Authorization': 'Bearer ' + TOKEN, 'Idempotency-Key': 'http-case'}
+        created = self.client.post('/api/v1/cases', json=case_request(), headers=self.headers)
+        self.assertEqual(created.status_code, 201, created.text)
+        self.case = created.json()
+        run = self.client.post('/api/v1/cases/' + self.case['case_id'] + '/runs',
+            json={'expected_state_version': 1},
+            headers=dict(self.headers, **{'Idempotency-Key': 'http-run'}))
+        self.assertEqual(run.status_code, 200, run.text)
+        tasks = self.client.get('/api/v1/cases/' + self.case['case_id'] + '/review-tasks',
+            headers=self.headers).json()['items']
+        self.task = tasks[0]
+
+    def tearDown(self):
+        self.client.__exit__(None, None, None)
+        self.tmp.cleanup()
+
+    def decision(self, **changes):
+        data = {'expected_state_version': 2, 'review_task_id': self.task['review_task_id'],
+                'decision': 'approve_draft', 'reason': 'Approved by the assigned manager.'}
+        data.update(changes)
+        return data
+
+    def test_approve_and_list_outbox_through_http(self):
+        response = self.client.post('/api/v1/cases/' + self.case['case_id'] + '/review-decisions',
+            headers=dict(self.headers, **{'Idempotency-Key': 'http-approve'}), json=self.decision())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['resolution'], 'approved')
+        listed = self.client.get('/api/v1/cases/' + self.case['case_id'] + '/outbox', headers=self.headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(len(listed.json()['items']), 1)
+        self.assertEqual(listed.json()['items'][0]['delivery_status'], 'not_attempted')
+
+    def test_http_authentication_and_scope_are_enforced(self):
+        path = '/api/v1/cases/' + self.case['case_id'] + '/review-decisions'
+        self.assertEqual(self.client.post(path, json=self.decision()).status_code, 401)
+        reader = {'Authorization': 'Bearer ' + READER_TOKEN, 'Idempotency-Key': 'reader-decision'}
+        self.assertEqual(self.client.post(path, json=self.decision(), headers=reader).status_code, 403)
+        other = {'Authorization': 'Bearer ' + OTHER_TOKEN, 'Idempotency-Key': 'other-decision'}
+        self.assertEqual(self.client.post(path, json=self.decision(), headers=other).status_code, 404)
+        self.assertEqual(self.client.get('/api/v1/cases/' + self.case['case_id'] + '/outbox',
+                                         headers=other).status_code, 404)
+
+    def test_http_validation_stale_and_idempotency_conflict(self):
+        path = '/api/v1/cases/' + self.case['case_id'] + '/review-decisions'
+        invalid = self.decision(decision='edit_and_approve')
+        self.assertEqual(self.client.post(path, json=invalid, headers=dict(
+            self.headers, **{'Idempotency-Key': 'invalid'})).status_code, 422)
+        stale = self.decision(expected_state_version=1)
+        stale_response = self.client.post(path, json=stale, headers=dict(
+            self.headers, **{'Idempotency-Key': 'stale-http'}))
+        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(stale_response.json()['error']['code'], 'STALE_STATE')
+        headers = dict(self.headers, **{'Idempotency-Key': 'replay-http'})
+        first = self.client.post(path, json=self.decision(), headers=headers)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(self.client.post(path, json=self.decision(), headers=headers).json(), first.json())
+        conflict = self.client.post(path, json=self.decision(reason='Changed reason'), headers=headers)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()['error']['code'], 'IDEMPOTENCY_CONFLICT')
 
 
 if __name__ == '__main__':

@@ -337,7 +337,7 @@ git commit -m "Add review decisions and durable outbox"
 - Produces: `POST /api/v1/cases/{case_id}/review-decisions`
 - Produces: `GET /api/v1/cases/{case_id}/outbox`
 
-- [ ] **Step 1: Write failing HTTP tests**
+- [x] **Step 1: Write failing HTTP tests**
 
 Use `TestClient(create_app(..., provider=ScriptedProvider(...)))` to create a case and review task, then assert:
 
@@ -358,13 +358,13 @@ self.assertEqual(len(listed.json()['items']), 1)
 
 Also assert 401 without authentication, 404 for another client's case, 403 for a read-only principal, 422 for invalid bodies, and 409 for stale/idempotency conflicts.
 
-- [ ] **Step 2: Run HTTP tests and verify RED**
+- [x] **Step 2: Run HTTP tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox.ReviewOutboxHttpTests -v`
 
 Expected: 404 because the new routes do not exist.
 
-- [ ] **Step 3: Add the two API routes**
+- [x] **Step 3: Add the two API routes**
 
 ```python
 @app.post('/api/v1/cases/{case_id}/review-decisions', response_model=ReviewTaskRecord)
@@ -378,17 +378,17 @@ def list_outbox(case_id: str, actor: Actor,
     return runtime_store.outbox_records(actor, case_id, cursor, limit)
 ```
 
-- [ ] **Step 4: Run HTTP and full API tests and verify GREEN**
+- [x] **Step 4: Run HTTP and full API tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_review_outbox tests.test_case_api tests.test_runtime -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Update the shared contract with implemented status**
+- [x] **Step 5: Update the shared contract with implemented status**
 
 Document exact request/response fields, lifecycle values, authorization, idempotency, state-version behavior, outbox non-delivery semantics, and the Student 3/4 consumption boundary. Remove statements that review tasks are read-only or fixed to `open` where they are superseded.
 
-- [ ] **Step 6: Run docs diff check and commit**
+- [x] **Step 6: Run docs diff check and commit**
 
 Run: `git diff --check`
 
