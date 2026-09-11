@@ -416,7 +416,7 @@ git commit -m "Expose review and outbox APIs"
 - Consumes: the implemented HTTP routes
 - Produces: copyable local demonstration instructions for Student 3, Student 4, and judges
 
-- [ ] **Step 1: Add a synthetic approval example**
+- [x] **Step 1: Add a synthetic approval example**
 
 ```json
 {
@@ -429,15 +429,15 @@ git commit -m "Expose review and outbox APIs"
 
 Mark the IDs and version as runtime placeholders in prose; the fixture is illustrative and must not be posted unchanged.
 
-- [ ] **Step 2: Document the end-to-end local flow**
+- [x] **Step 2: Document the end-to-end local flow**
 
 Add PowerShell examples that obtain the current case version and open task ID, post an approval with a fresh idempotency key, list outbox records, and verify `delivery_status=not_attempted`. State explicitly that no email was sent and that Student 3 must resolve a trusted contact and implement delivery separately.
 
-- [ ] **Step 3: Update status summaries**
+- [x] **Step 3: Update status summaries**
 
 Update README and runtime documentation to say review resolution and durable approved outbox are implemented, while contact resolution, mail delivery, reply ingestion, reminder scheduling, and dashboard remain outstanding.
 
-- [ ] **Step 4: Run complete local verification**
+- [x] **Step 4: Run complete local verification**
 
 Run:
 
@@ -450,7 +450,7 @@ git status --short
 
 Expected: no broken requirements, all tests pass, no diff whitespace errors, and only intended files are modified.
 
-- [ ] **Step 5: Review the branch diff and commit documentation**
+- [x] **Step 5: Review the branch diff and commit documentation**
 
 Run: `git diff origin/main --stat`
 
@@ -461,7 +461,7 @@ git add README.md docs/backend.md docs/agent-runtime.md examples/review-decision
 git commit -m "Document reviewed outbox workflow"
 ```
 
-- [ ] **Step 6: Final branch verification**
+- [x] **Step 6: Final branch verification**
 
 Run:
 

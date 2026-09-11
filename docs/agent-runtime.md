@@ -1,6 +1,6 @@
 # First live case-analysis loop
 
-This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). It reads the persisted checklist and can generate an unsent request draft or an assigned human review task. It cannot yet assess uploaded documents, interpret replies, send mail, schedule follow-ups, resolve reviews or confirm readiness.
+This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). It reads the persisted checklist and can generate a guarded unsent request draft or an assigned human review task. Assigned managers can now resolve communication/error tasks, and approval creates a durable reviewed outbox record. It cannot yet assess uploaded documents, interpret replies, resolve contacts, send mail, schedule follow-ups or confirm readiness.
 
 ## Enable it locally
 
@@ -56,7 +56,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/runs/$($run.ru
 
 Recovery requires a manager with case access. It marks expired running (or explicitly abandoned queued) work needs_review and ensures one assigned task for that run. It does not resend, rerun inference or erase committed effects. The transition is intrinsically idempotent; repeating recovery on a terminal run has no effect. Active leases return 409. A recovered worker cannot subsequently apply a proposal with its old claim. There is no background recovery worker in this increment.
 
-Review tasks expose cursor pagination (limit 1..100), reason, optional draft and fixed sent=false. Task resolution is not implemented yet. New analysis with a new key is a new explicit operation and may create another review task; deduplication across distinct business events and review resolution are still required before a pilot.
+Review tasks expose cursor pagination (limit 1..100), reason, optional draft, resolution metadata and fixed sent=false. The assigned manager can approve, edit and approve, reject, or dismiss an operational-error task through the authenticated review-decisions endpoint. Approval creates one durable `pending_reviewed_delivery` outbox record with `delivery_status=not_attempted`; it does not resolve a recipient or send mail. New analysis with a new key is a new explicit operation and may create another review task; deduplication across distinct business events is still required before a pilot.
 
 ## Reproduce the live synthetic check
 
@@ -70,4 +70,4 @@ On 2026-09-10, an initial sandbox-restricted attempt failed with NETWORK_ERROR, 
 
 Deterministic tests use an explicitly named scripted_test provider and record live=false. They test controls and failure paths, not model reasoning. Existing core tables remain at schema version 1; runtime tables are additive in this development increment. Future schema changes need a proper migration strategy before deployment.
 
-Next integration boundaries: Student 2 supplies scoped document artifacts and DocumentAssessment; Student 3 supplies reply interpretation, approved communication policy and transport; Student 4 can consume runs/review tasks alongside cases/audit. Do not bypass the central action gate when integrating these modules.
+Next integration boundaries: Student 2 supplies scoped document artifacts and DocumentAssessment; Student 3 supplies reply interpretation, approved communication policy, contact resolution and transport against the reviewed outbox; Student 4 consumes runs/review tasks/outbox alongside cases/audit and invokes review decisions. Do not bypass the central action gate when integrating these modules.
