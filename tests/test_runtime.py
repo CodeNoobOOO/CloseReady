@@ -103,6 +103,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(all(t.draft is None for t in self.db.review_tasks(self.actor, self.case.case_id).items))
         self.assertEqual(self.store.get_case(self.actor, self.case.case_id).requirements[0].status, 'missing')
 
+    def test_internal_identifier_in_model_draft_is_rejected_without_persisting_text(self):
+        rid = self.case.requirements[0].requirement_id
+        unsafe = tool('propose_action', {'action': {'action_type': 'request_documents',
+            'requirement_ids': [rid], 'finding_ids': [], 'reason': 'July statement is missing.',
+            'payload': {'subject': 'July statement', 'body': 'Upload requirement ' + rid,
+                        'requirement_ids': [rid]}}}, 'unsafe')
+        result = self.run_with(ScriptedProvider([tool('get_case_context', {}), unsafe, final()]), max_repairs=0)
+        self.assertEqual(result.error_code, 'UNSAFE_DRAFT')
+        tasks = self.db.review_tasks(self.actor, self.case.case_id).items
+        self.assertEqual(len(tasks), 1)
+        self.assertIsNone(tasks[0].draft)
+
     def test_changed_version_blocks_stale_model_action(self):
         def change_then_propose(messages):
             self.store.change_deadline(self.actor, self.case.case_id, ChangeDeadlineRequest(

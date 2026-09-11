@@ -16,7 +16,10 @@ from .config import AccessConfig, Principal, load_access_config
 from .models import CaseSnapshot
 from .store import DomainError, Store
 from .runtime import AgentRuntime
-from .runtime_models import AnalyseRequest, ReviewTaskPage, RunRecord
+from .runtime_models import (
+    AnalyseRequest, OutboxPage, ReviewDecisionRequest, ReviewTaskPage,
+    ReviewTaskRecord, RunRecord,
+)
 from .runtime_store import RuntimeStore
 from .llm import LLMProvider
 from .provider_factory import provider_from_environment
@@ -121,6 +124,16 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
                      cursor: Annotated[str | None, Query(max_length=128)] = None,
                      limit: Annotated[int, Query(ge=1, le=100)] = 50):
         return runtime_store.review_tasks(actor, case_id, cursor, limit)
+
+    @app.post('/api/v1/cases/{case_id}/review-decisions', response_model=ReviewTaskRecord)
+    def decide_review(case_id: str, body: ReviewDecisionRequest, actor: Actor, key: Key):
+        return runtime_store.decide_review(actor, case_id, body, key)
+
+    @app.get('/api/v1/cases/{case_id}/outbox', response_model=OutboxPage)
+    def list_outbox(case_id: str, actor: Actor,
+                    cursor: Annotated[str | None, Query(max_length=128)] = None,
+                    limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return runtime_store.outbox_records(actor, case_id, cursor, limit)
 
     return app
 

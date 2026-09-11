@@ -1,6 +1,6 @@
 # Case API: local development
 
-The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An optional [live analysis loop](agent-runtime.md) now calls DeepSeek and stores unsent draft/review tasks. It does not activate client communication, send mail, accept documents or confirm readiness.
+The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An optional [live analysis loop](agent-runtime.md) calls a configured provider and stores guarded draft/review tasks. Assigned managers can resolve these tasks; approving a draft creates a durable reviewed outbox record. It does not activate client communication, resolve a recipient, send mail, accept documents or confirm readiness.
 
 ## Setup on Windows
 
@@ -52,6 +52,33 @@ Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/cases/$($crea
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/audit-events" -Headers $apiHeaders
 ```
 
+## Review a draft and create a durable outbox record
+
+After a live or scripted analysis has created a safe draft, always reload the case and open tasks rather than copying a stale version or ID:
+
+```powershell
+$currentCase = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)" -Headers $apiHeaders
+$openTask = (Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/review-tasks" -Headers $apiHeaders).items |
+    Where-Object { $_.status -eq 'open' -and $null -ne $_.draft } |
+    Select-Object -First 1
+
+$apiHeaders['Idempotency-Key'] = 'approve-draft-demo-1'
+$decisionBody = @{
+    expected_state_version = $currentCase.state_version
+    review_task_id = $openTask.review_task_id
+    decision = 'approve_draft'
+    reason = 'Reviewed and approved by the assigned account manager.'
+} | ConvertTo-Json
+
+$resolved = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/review-decisions" `
+    -Headers $apiHeaders -ContentType 'application/json' -Body $decisionBody
+$outboxPage = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/cases/$($createdCase.case_id)/outbox" -Headers $apiHeaders
+$resolved | ConvertTo-Json -Depth 12
+$outboxPage | ConvertTo-Json -Depth 12
+```
+
+The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery`, no recipient, and `delivery_status=not_attempted`. No email is sent. Student 3 must later resolve an approved contact and implement a separately controlled delivery lifecycle. Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
+
 Stop and restart the server using the same database URL: the case, version, audit history and successful idempotent responses remain. Repeating an identical mutation with its original key returns the original snapshot without another mutation. To see a stale rejection, repeat the deadline request with a new key and the old expected_state_version=1.
 
 ## Available routes
@@ -63,6 +90,9 @@ Stop and restart the server using the same database URL: the case, version, audi
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
+| GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
+| POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
+| GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages; no delivery claim | Actor with client grant |
 
 List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Keys are scoped by actor and operation (including the case for deadline updates). Replays preserve the original response, which may be older than the current case; GET the case for current state.
 

@@ -1,6 +1,15 @@
-# CloseReady shared contracts v0.5
+# CloseReady shared contracts v0.6
 
-Status: core models, case API and a limited live analysis runtime are implemented. The runtime reads checklists and records gated unsent draft/review tasks, with durable events/runs and explicit recovery. Document/reply assessment and communication execution remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, a limited live analysis runtime, communication-review decisions and a durable reviewed-message outbox are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and explicit recovery. Document/reply assessment, contact resolution and communication delivery remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md) and [runtime details](agent-runtime.md).
+
+## v0.6 review and outbox increment
+
+- Customer-visible draft subjects and bodies pass a deterministic guard before storage and again before approval. Internal `case_`, `req_`, `run_`, `review_`, `event_` and `proposal_` identifiers remain structured metadata but are rejected in visible text. Unsafe URL schemes, control characters and configured length violations return `UNSAFE_DRAFT`; text is never silently redacted.
+- `ReviewTaskRecord.status` is `open` or `resolved`. Resolved records contain `resolution` (`approved`, `edited_and_approved`, `rejected` or `dismissed`), `resolved_by`, `resolved_at`, `resolution_reason`, and an `approved_draft` only for approvals. Missing lifecycle fields on older open JSON records default to null.
+- `POST /api/v1/cases/{case_id}/review-decisions` accepts `expected_state_version`, `review_task_id`, `decision`, `reason`, and an `edited_draft` only for `edit_and_approve`. Decisions are manager-only, assigned-owner-only, terminal, version checked and idempotent. It returns the resolved ReviewTaskRecord.
+- `approve_draft` and `edit_and_approve` atomically resolve the task, increment the case version, write audit entries and create one `pending_reviewed_delivery` OutboxRecord. `reject_draft` resolves a draft task without an outbox record. `dismiss_error` resolves only a task without a draft.
+- `GET /api/v1/cases/{case_id}/outbox` returns a scoped page of durable records. OutboxRecord contains `outbox_id`, case/review/requirement references, guarded subject/body, `recipient_contact_id=null`, `provider_message_id=null`, creator/time and `delivery_status=not_attempted`. It is reviewed work for Student 3 to consume, not evidence that mail was queued at a provider or sent.
+- Review resolution cannot accept or waive a requirement and leaves readiness at `collecting`. Contact resolution, delivery attempts, task reopening and evidence-review decisions are separate future increments.
 
 ## v0.5 analysis runtime increment
 
@@ -10,7 +19,7 @@ Provider selection is server configuration, not a business request field. Core c
 - POST /api/v1/runs/{run_id}/recover requires a manager and Idempotency-Key. It idempotently turns expired running or abandoned queued analysis into needs_review; active leases return 409. It does not replay inference or external effects.
 - Model tools: get_case_context accepts {}; propose_action accepts {action: ActionContent}. IDs/version remain server-bound. One gated action per run; calls after a failed call in a batch are skipped. Only single mode is implemented.
 - Request/clarification actions currently have outcome=blocked with code=MAIL_NOT_CONFIGURED, while an unsent draft review task is actually stored. Do not interpret them as queued/sent. create_review_task is executable; no_action requires no outstanding requirements or review blockers. Other action types are rejected as unavailable.
-- Runtime ReviewTaskRecord: review_task_id, case_id, run_id, requirement_ids, reason_code, reason, assigned_to, status=open, nullable draft, sent=false, created_at. It is a read-only subset of the future full review lifecycle below; evidence/resolution fields and human resolution endpoints are not implemented yet.
+- Initial runtime ReviewTaskRecord fields are review_task_id, case_id, run_id, requirement_ids, reason_code, reason, assigned_to, nullable draft, sent=false and created_at. The v0.6 lifecycle and resolution API extend this record.
 - RunRecord includes provider, model, live, prompt_version, schema_version, nullable error_code and traces in addition to the earlier run fields. Trace includes step, latency_ms, nullable usage/provider_request_id, tool_names, tool_call_ids, outcomes and nullable error_code. Old diagnostic rows may have empty call IDs.
 - Adding a review task increments state_version and resets readiness to collecting. It does not accept or waive a requirement. Records and audit commit together; claims expire after 300 seconds. Recovering an existing task does not create another task for the same run.
 
@@ -24,7 +33,7 @@ Provider selection is server configuration, not a business request field. Core c
 - Audit items: audit_id (positive integer), case_id, nullable event_id/run_id, actor_user_id, action, outcome, reason, occurred_at, nullable old_state_version/new_state_version, policy_id/policy_version. Direct case operations have null event/run IDs because they do not activate the agent.
 - Pagination: limit 1..100, default 50; return items and nullable next_cursor. Forward next_cursor unchanged to the same listing endpoint. Case ordering is lexical case_id; audit ordering is audit_id.
 
-The deliverable must use a real LLM API and persisted business state. Fixtures only unblock parallel development and deterministic tests; they are not the agent implementation. See [LLM runtime](llm-runtime.md) for provider integration and [business acceptance](business-acceptance.md) for source alignment and pilot gates. A standalone DeepSeek connectivity probe has passed; the business runtime remains outstanding.
+The deliverable must use a real LLM API and persisted business state. Fixtures only unblock parallel development and deterministic tests; they are not the agent implementation. See [LLM runtime](llm-runtime.md) for provider integration and [business acceptance](business-acceptance.md) for source alignment and pilot gates. DeepSeek has passed both the native-tool connectivity check and a synthetic business-runtime path; this does not establish business accuracy or production readiness.
 
 ## v0.3 implementation clarifications
 
@@ -53,7 +62,7 @@ Payload finding_id must be included in envelope finding_ids. Draft requirement_i
 
 | Owner | Owns | Boundary |
 | --- | --- | --- |
-| Student 1 | Case APIs, persistence, runtime, policy validation and recovery | Sole application path for state changes and external-action authorisation |
+| Student 1 | Case APIs, persistence, runtime, review decisions, outbox authorization, policy validation and recovery | Sole application path for state changes and external-action authorisation |
 | Student 2 | Upload/extraction and document assessment | Returns findings; never changes requirement status directly |
 | Student 3 | Reply interpretation, reminder drafts, scheduling and mail adapter | Sending requires the shared execution gate |
 | Student 4 | Dashboard, review UI and evaluation | Calls APIs; does not access database tables directly |
@@ -128,7 +137,7 @@ Allowed model proposals: apply_document_finding, record_commitment, request_docu
 
 - apply_document_finding: payload identifies document finding; the application maps validated evidence to permitted status changes.
 - record_commitment: payload identifies reply finding and promised_at.
-- request_documents: payload contains subject/body draft and requirement IDs for an initial request or permitted follow-up. Application resolves recipients and upload links, checks timing and creates an outbox item.
+- request_documents: payload contains subject/body draft and requirement IDs for an initial request or permitted follow-up. The current runtime creates a guarded review task; approval creates an outbox item. Recipient, upload-link and timing resolution remain with the communication integration.
 - request_clarification: payload contains a draft; timing and delivery policy still apply.
 - schedule_reminder: payload contains scheduled_at and a draft.
 - create_review_task: payload contains issue and supporting references.
@@ -164,14 +173,15 @@ Each audit entry records event/run IDs, actor, action, outcome, evidence or poli
 - Contact: contact_id, client_id, approved_email, active, approved_by. A sender match alone is insufficient to override case association or authorise a waiver.
 - Document: document_id, case_id, file_hash, storage_ref, original_filename, content_type, extraction_status, extracted_artifact_ref, uploaded_by, uploaded_at. Storage refs are application-managed, not arbitrary paths or URLs supplied to tools.
 - Reply: reply_id, case_id, provider_message_id, conversation_ref, sender_contact_id, received_at, body_ref, attachment_document_ids. Unknown or ambiguous associations are quarantined for review before the agent sees another client's context.
-- ReviewTask: review_task_id, case_id, requirement_ids, reason_code, evidence_refs, assigned_to, status (open/resolved), resolution, created_at, resolved_at. Exhausted retries and escalation thresholds must create an assigned task, not only a log line.
+- ReviewTask: review_task_id, case_id, run_id, requirement_ids, reason_code, reason, assigned_to, status (open/resolved), nullable draft, sent=false, created_at, resolution, resolved_by, resolved_at, resolution_reason and nullable approved_draft. Exhausted retries and escalation thresholds must create an assigned task, not only a log line.
+- Reviewed outbox: outbox_id, case_id, review_task_id, requirement_ids, guarded subject/body, status=pending_reviewed_delivery, recipient_contact_id=null, provider_message_id=null, created_by, created_at and delivery_status=not_attempted. Student 3 extends delivery through a separate controlled interface rather than mutating this record through the model.
 - Reminder: reminder_id, case_id, requirement_ids, scheduled_at, status, dedupe_key, contact_id, policy_version, source_commitment_id (nullable), attempt_count. The resolved recipient is recorded in restricted execution history.
 
 Owner and deadline enable overdue sorting and escalation. Clients can have multiple accounts, periods and requirements; do not hard-code a single July bank statement.
 
 ## Frontend HTTP contract — Student 4
 
-All routes below have prefix /api/v1. Case creation/listing/retrieval, run retrieval, review-task retrieval and audit retrieval are available from this table; other routes remain planned. Deadline, analysis and recovery routes are additionally available as specified above.
+All routes below have prefix /api/v1. Case creation/listing/retrieval, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing and audit retrieval are available from this table; other routes remain planned. Deadline, analysis and recovery routes are additionally available as specified above.
 
 | Method and route | Purpose | Response |
 | --- | --- | --- |
@@ -183,7 +193,8 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, run retri
 | GET /runs/{run_id} | Poll processing | 200: run record |
 | GET /cases/{case_id}/findings | Evidence assessments | 200: items and next_cursor |
 | GET /cases/{case_id}/review-tasks | Pending and resolved review tasks | 200: items and next_cursor |
-| POST /cases/{case_id}/review-decisions | Authenticated reviewer decision | 200: updated case snapshot |
+| POST /cases/{case_id}/review-decisions | Resolve a communication-draft or operational-error review | 200: resolved review task |
+| GET /cases/{case_id}/outbox | List reviewed messages awaiting communication integration | 200: items and next_cursor |
 | POST /cases/{case_id}/confirm-readiness | Human readiness confirmation | 200: updated case snapshot |
 | GET /cases/{case_id}/audit-events | Audit history | 200: items and next_cursor |
 | GET /cases/{case_id}/reminders | Scheduled and completed follow-up | 200: items and next_cursor |
@@ -193,7 +204,7 @@ Case creation takes client_id, accounting_period, timezone, owner_user_id, due_a
 
 Document upload reserves the event/run records and returns 202 only after durable file registration. Run status remains queued until extraction succeeds or a failure is recorded. A scoped client upload session must bind the authorised client/case server-side and cannot grant review permissions. Contact/policy provisioning may use an administrator-managed seed/import in the MVP; its trusted configuration is not editable by the model.
 
-Review body: expected_state_version, review_task_id (nullable), requirement_id, decision, reason, evidence_refs. decision: accept, request_correction, waive, pause_followup, resume_followup. Final confirmation body: expected_state_version and reason. Resolve the referenced task when its issue is addressed; unresolved independent blockers still prevent confirmation.
+Implemented communication-review body: expected_state_version, review_task_id, decision, reason and nullable edited_draft. decision is approve_draft, edit_and_approve, reject_draft or dismiss_error. edited_draft is required only for edit_and_approve and its requirement IDs must match the task. Evidence acceptance, correction, waiver and follow-up pause/resume decisions remain planned and must extend the contract explicitly rather than overloading these meanings. Final confirmation body remains planned as expected_state_version and reason.
 
 Mutation requests carry an Idempotency-Key header. Same key and payload replay the recorded response; the same key with different payload is rejected. Keys are scoped to authenticated actor and operation.
 

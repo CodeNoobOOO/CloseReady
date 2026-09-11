@@ -3,7 +3,7 @@ Agentic document collection and bookkeeping readiness for accounting firms.
 
 ## Current status
 
-An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. A configurable LLM case-analysis loop reads a checklist and records a validated, assigned unsent draft/review task; DeepSeek has been live-tested. See [backend setup](docs/backend.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, review resolution, reminders, mail transport and deployment remain unimplemented; this is not yet the complete bookkeeping-readiness agent.
+An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. A configurable LLM case-analysis loop reads a checklist and records a validated, assigned unsent draft/review task; DeepSeek has been live-tested. An assigned manager can approve, safely edit, reject or dismiss that task, and approval atomically creates a durable reviewed outbox record. See [backend setup](docs/backend.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, contact resolution, reminders, mail transport and deployment remain unimplemented; an outbox record is not evidence that mail was sent.
 
 ## Python connectivity check
 

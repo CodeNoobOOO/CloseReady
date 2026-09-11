@@ -1,13 +1,18 @@
 """Durable analysis runs and the limited, transactional first action gate."""
 from datetime import datetime, timezone
+import hashlib
 import json
 import time
 from uuid import uuid4
 
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, UniqueConstraint, insert, select, update
 
+from .content_guard import validate_customer_visible_draft
 from .models import ActionProposal, CaseSnapshot
-from .runtime_models import ReviewTaskPage, ReviewTaskRecord, RunRecord
+from .runtime_models import (
+    OutboxPage, OutboxRecord, ReviewDecisionRequest, ReviewTaskPage,
+    ReviewTaskRecord, RunRecord,
+)
 from .store import DomainError, Store, cases, forbidden
 
 runtime_metadata = MetaData()
@@ -26,6 +31,13 @@ proposals = Table('agent_proposals', runtime_metadata,
 reviews = Table('review_tasks', runtime_metadata,
     Column('review_task_id', String, primary_key=True), Column('case_id', String, nullable=False, index=True),
     Column('run_id', String, nullable=False, unique=True), Column('record', Text, nullable=False))
+outbox = Table('mail_outbox', runtime_metadata,
+    Column('outbox_id', String, primary_key=True), Column('case_id', String, nullable=False, index=True),
+    Column('review_task_id', String, nullable=False, unique=True), Column('record', Text, nullable=False))
+review_responses = Table('review_idempotent_responses', runtime_metadata,
+    Column('actor_id', String, primary_key=True), Column('case_id', String, primary_key=True),
+    Column('key', String, primary_key=True), Column('request_hash', String, nullable=False),
+    Column('response', Text, nullable=False))
 traces = Table('agent_traces', runtime_metadata,
     Column('run_id', String, primary_key=True), Column('step', Integer, primary_key=True), Column('record', Text, nullable=False))
 
@@ -65,6 +77,105 @@ class RuntimeStore:
             rows = conn.execute(query.order_by(reviews.c.review_task_id).limit(limit + 1)).mappings().all()
         return ReviewTaskPage(items=[ReviewTaskRecord.model_validate_json(r['record']) for r in rows[:limit]],
             next_cursor=rows[limit - 1]['review_task_id'] if len(rows) > limit else None)
+
+    def outbox_records(self, actor, case_id, cursor=None, limit=50):
+        with self.store.engine.connect() as conn:
+            self.store._case(conn, actor, case_id)
+            query = select(outbox).where(outbox.c.case_id == case_id)
+            if cursor:
+                query = query.where(outbox.c.outbox_id > cursor)
+            rows = conn.execute(query.order_by(outbox.c.outbox_id).limit(limit + 1)).mappings().all()
+        return OutboxPage(items=[OutboxRecord.model_validate_json(row['record']) for row in rows[:limit]],
+            next_cursor=rows[limit - 1]['outbox_id'] if len(rows) > limit else None)
+
+    @staticmethod
+    def _decision_digest(request):
+        canonical = json.dumps(request.model_dump(mode='json'), sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def decide_review(self, actor, case_id: str, request: ReviewDecisionRequest, key: str):
+        error, current = None, None
+        digest = self._decision_digest(request)
+        with self.store.write() as conn:
+            try:
+                current = self.store._case(conn, actor, case_id)
+                if not actor.can_manage:
+                    raise forbidden()
+                replay = conn.execute(select(review_responses).where(
+                    review_responses.c.actor_id == actor.user_id,
+                    review_responses.c.case_id == case_id,
+                    review_responses.c.key == key)).mappings().one_or_none()
+                if replay:
+                    if replay['request_hash'] != digest:
+                        raise DomainError('IDEMPOTENCY_CONFLICT', 'Key was already used with different input.', 409)
+                    return ReviewTaskRecord.model_validate_json(replay['response'])
+                raw = conn.execute(select(reviews.c.record).where(
+                    reviews.c.review_task_id == request.review_task_id,
+                    reviews.c.case_id == case_id)).scalar_one_or_none()
+                if raw is None:
+                    raise DomainError('NOT_FOUND', 'Review task not found.', 404)
+                task = ReviewTaskRecord.model_validate_json(raw)
+                if task.assigned_to != actor.user_id:
+                    raise forbidden()
+                if task.status != 'open':
+                    raise DomainError('REVIEW_ALREADY_RESOLVED', 'Review task is already resolved.', 409)
+                if current.state_version != request.expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                draft_decisions = {'approve_draft', 'edit_and_approve', 'reject_draft'}
+                if (request.decision in draft_decisions) != (task.draft is not None):
+                    raise DomainError('INVALID_REVIEW_DECISION', 'Decision does not match the review task type.', 422)
+                final_draft = None
+                if request.decision == 'approve_draft':
+                    final_draft = task.draft
+                elif request.decision == 'edit_and_approve':
+                    final_draft = request.edited_draft
+                    if (len(final_draft.requirement_ids) != len(task.requirement_ids)
+                            or set(final_draft.requirement_ids) != set(task.requirement_ids)):
+                        raise DomainError('INVALID_REVIEW_DECISION',
+                            'Edited draft requirements must match the review task.', 422)
+                if final_draft:
+                    validate_customer_visible_draft(final_draft)
+                resolution = {'approve_draft': 'approved',
+                    'edit_and_approve': 'edited_and_approved', 'reject_draft': 'rejected',
+                    'dismiss_error': 'dismissed'}[request.decision]
+                resolved_at = now()
+                resolved = ReviewTaskRecord.model_validate({**task.model_dump(mode='json'),
+                    'status': 'resolved', 'resolution': resolution, 'resolved_by': actor.user_id,
+                    'resolved_at': resolved_at, 'resolution_reason': request.reason,
+                    'approved_draft': final_draft.model_dump(mode='json') if final_draft else None})
+                queued = None
+                if final_draft:
+                    queued = OutboxRecord(outbox_id='outbox_' + uuid4().hex, case_id=case_id,
+                        review_task_id=task.review_task_id, requirement_ids=task.requirement_ids,
+                        subject=final_draft.subject, body=final_draft.body,
+                        created_by=actor.user_id, created_at=resolved_at)
+                    conn.execute(insert(outbox).values(outbox_id=queued.outbox_id, case_id=case_id,
+                        review_task_id=task.review_task_id, record=queued.model_dump_json()))
+                changed = CaseSnapshot.model_validate({**current.model_dump(mode='json'),
+                    'state_version': current.state_version + 1, 'readiness_status': 'collecting'})
+                updated = conn.execute(update(cases).where(cases.c.case_id == case_id,
+                    cases.c.state_version == current.state_version).values(
+                        state_version=changed.state_version, snapshot=changed.model_dump_json()))
+                if updated.rowcount != 1:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                conn.execute(update(reviews).where(reviews.c.review_task_id == task.review_task_id).values(
+                    record=resolved.model_dump_json()))
+                self.store._audit(conn, actor, 'resolve_review_task', 'executed', resolution,
+                    changed, old=current.state_version, new=changed.state_version, run_id=task.run_id)
+                if queued:
+                    self.store._audit(conn, actor, 'queue_reviewed_outbox', 'queued',
+                        'REVIEWED_DELIVERY_PENDING', changed, old=changed.state_version,
+                        new=changed.state_version, run_id=task.run_id)
+                conn.execute(insert(review_responses).values(actor_id=actor.user_id, case_id=case_id,
+                    key=key, request_hash=digest, response=resolved.model_dump_json()))
+            except DomainError as exc:
+                error = exc
+                self.store._audit(conn, actor, 'resolve_review_task',
+                    'stale' if exc.code == 'STALE_STATE' else 'blocked', exc.code, current,
+                    old=current.state_version if current else None)
+        if error:
+            raise error
+        return resolved
 
     def start(self, actor, case_id, version, key, provider, model, live):
         with self.store.write() as conn:
@@ -177,7 +288,9 @@ class RuntimeStore:
             if action.action_type in ('request_documents', 'request_clarification'):
                 if not action.requirement_ids or not set(action.requirement_ids).issubset(outstanding):
                     raise DomainError('INVALID_TOOL', 'Draft must refer only to outstanding items.', 422)
-                draft, code = action.payload, 'MAIL_NOT_CONFIGURED'
+                draft = action.payload
+                validate_customer_visible_draft(draft)
+                code = 'MAIL_NOT_CONFIGURED'
             elif action.action_type == 'create_review_task':
                 if action.payload.evidence_refs:
                     raise DomainError('INVALID_TOOL', 'Document evidence storage is not available yet.', 422)

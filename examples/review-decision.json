@@ -1,0 +1,6 @@
+{
+  "expected_state_version": 2,
+  "review_task_id": "replace-with-returned-review-task-id",
+  "decision": "approve_draft",
+  "reason": "Reviewed and approved by the assigned account manager."
+}
