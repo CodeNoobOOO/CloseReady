@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, UniqueConstraint, insert, select, update
 
+from .content_guard import validate_customer_visible_draft
 from .models import ActionProposal, CaseSnapshot
 from .runtime_models import ReviewTaskPage, ReviewTaskRecord, RunRecord
 from .store import DomainError, Store, cases, forbidden
@@ -177,7 +178,9 @@ class RuntimeStore:
             if action.action_type in ('request_documents', 'request_clarification'):
                 if not action.requirement_ids or not set(action.requirement_ids).issubset(outstanding):
                     raise DomainError('INVALID_TOOL', 'Draft must refer only to outstanding items.', 422)
-                draft, code = action.payload, 'MAIL_NOT_CONFIGURED'
+                draft = action.payload
+                validate_customer_visible_draft(draft)
+                code = 'MAIL_NOT_CONFIGURED'
             elif action.action_type == 'create_review_task':
                 if action.payload.evidence_refs:
                     raise DomainError('INVALID_TOOL', 'Document evidence storage is not available yet.', 422)

@@ -33,7 +33,7 @@
 - Consumes: `MessageDraft` from `closeready.models`
 - Produces: `validate_customer_visible_draft(draft: MessageDraft) -> None`, raising `DomainError('UNSAFE_DRAFT', ..., 422)`
 
-- [ ] **Step 1: Write focused failing unit tests for the guard**
+- [x] **Step 1: Write focused failing unit tests for the guard**
 
 ```python
 class ContentGuardTests(unittest.TestCase):
@@ -60,13 +60,13 @@ class ContentGuardTests(unittest.TestCase):
                 validate_customer_visible_draft(draft)
 ```
 
-- [ ] **Step 2: Run the new tests and verify RED**
+- [x] **Step 2: Run the new tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_content_guard -v`
 
 Expected: import failure because `closeready.content_guard` does not exist.
 
-- [ ] **Step 3: Implement the deterministic guard**
+- [x] **Step 3: Implement the deterministic guard**
 
 ```python
 import re
@@ -94,13 +94,13 @@ def validate_customer_visible_draft(draft: MessageDraft) -> None:
         raise DomainError('UNSAFE_DRAFT', 'Customer-visible draft contains a disallowed URI scheme.', 422)
 ```
 
-- [ ] **Step 4: Run the guard tests and verify GREEN**
+- [x] **Step 4: Run the guard tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_content_guard -v`
 
 Expected: all guard tests pass.
 
-- [ ] **Step 5: Add a failing runtime test proving unsafe model output is not stored**
+- [x] **Step 5: Add a failing runtime test proving unsafe model output is not stored**
 
 ```python
 def test_internal_identifier_in_model_draft_is_rejected_without_persisting_text(self):
@@ -116,13 +116,13 @@ def test_internal_identifier_in_model_draft_is_rejected_without_persisting_text(
     self.assertIsNone(tasks[0].draft)
 ```
 
-- [ ] **Step 6: Run the runtime test and verify RED**
+- [x] **Step 6: Run the runtime test and verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_runtime.RuntimeTests.test_internal_identifier_in_model_draft_is_rejected_without_persisting_text -v`
 
 Expected: failure because the unsafe draft is currently stored.
 
-- [ ] **Step 7: Call the guard inside `RuntimeStore.apply` before `_review`**
+- [x] **Step 7: Call the guard inside `RuntimeStore.apply` before `_review`**
 
 ```python
 if action.action_type in ('request_documents', 'request_clarification'):
@@ -133,7 +133,7 @@ if action.action_type in ('request_documents', 'request_clarification'):
     code = 'MAIL_NOT_CONFIGURED'
 ```
 
-- [ ] **Step 8: Run runtime and guard tests and commit**
+- [x] **Step 8: Run runtime and guard tests and commit**
 
 Run: `.venv\Scripts\python.exe -m unittest tests.test_content_guard tests.test_runtime -v`
 
