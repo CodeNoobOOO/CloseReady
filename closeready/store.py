@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     Column, Integer, MetaData, String, Table, Text as SQLText,
-    create_engine, insert, select, update,
+    create_engine, insert, inspect, select, update,
 )
 from sqlalchemy.engine import make_url
 
@@ -59,6 +59,19 @@ class Store:
                 conn.execute(insert(schema).values(version=1))
             elif versions != [1]:
                 raise RuntimeError('Unsupported database schema version; migration required.')
+
+    def check_ready(self, additional_tables=()) -> None:
+        """Raise unless expected schema and a rollback-only write are usable."""
+        with self.engine.connect() as conn:
+            conn.exec_driver_sql('BEGIN IMMEDIATE')
+            try:
+                versions = list(conn.execute(select(schema.c.version)).scalars())
+                required = set(metadata.tables).union(additional_tables)
+                if versions != [1] or not required.issubset(inspect(conn).get_table_names()):
+                    raise RuntimeError('Required database schema is unavailable.')
+                conn.execute(insert(audit).values(case_id=None, record='{"health_probe":true}'))
+            finally:
+                conn.rollback()
 
     @contextmanager
     def write(self):

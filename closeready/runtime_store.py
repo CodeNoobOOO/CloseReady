@@ -52,6 +52,9 @@ class RuntimeStore:
         self.store = store
         runtime_metadata.create_all(store.engine)
 
+    def check_ready(self):
+        self.store.check_ready(runtime_metadata.tables)
+
     def _row(self, conn, actor, run_id):
         row = conn.execute(select(runs).where(runs.c.run_id == run_id)).mappings().one_or_none()
         if row is None:

@@ -1,6 +1,15 @@
-# CloseReady shared contracts v0.7
+# CloseReady shared contracts v0.8
 
-Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions and a reviewed-message outbox are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Document/reply assessment, contact resolution and communication delivery remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions, a reviewed-message outbox and a single-host deployment package are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Document/reply assessment, contact resolution, communication delivery and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+
+## v0.8 deployment foundation increment
+
+- `GET /health/live` returns only `{"status":"ok"}` when the API process is serving requests.
+- `GET /health/ready` validates schema version 1, all core/runtime tables and a rollback-only write, returning only `{"status":"ready"}` on success or the safe shared `NOT_READY` error envelope with status 503.
+- Health endpoints are intentionally unauthenticated for container supervision. They expose no business data, configuration paths, provider identity or exception detail and never call an LLM.
+- One non-root image supplies both the API and durable worker. The example Compose topology runs them as separate restricted services with an administrator-mounted access file and one shared persistent volume.
+- SQLite deployment is limited to one host. A multi-host topology requires a managed transactional database and an explicit migration design.
+- CI runs deterministic unit, compilation and dependency checks plus an image build. CI has no provider credentials and performs no live inference.
 
 ## v0.7 durable activation and worker increment
 
