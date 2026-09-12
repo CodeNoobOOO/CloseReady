@@ -3,7 +3,7 @@ Agentic document collection and bookkeeping readiness for accounting firms.
 
 ## Current status
 
-An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. An authorised activation queues a durable event and run for a separately supervised worker; the configurable LLM loop reads the checklist and records a validated, assigned unsent draft/review task. DeepSeek has been live-tested. An assigned manager can approve, safely edit, reject or dismiss that task, and approval atomically creates a durable reviewed outbox record. See [backend setup](docs/backend.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, contact resolution, reminders, mail transport and deployment remain unimplemented; an outbox record is not evidence that mail was sent.
+An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. An authorised activation queues a durable event and run for a separately supervised worker; the configurable LLM loop reads the checklist and records a validated, assigned unsent draft/review task. DeepSeek has been live-tested. An assigned manager can approve, safely edit, reject or dismiss that task, and approval atomically creates a durable reviewed outbox record. Public data-free health checks, a non-root container image, a single-host API/worker Compose topology and deterministic CI are included. See [backend setup](docs/backend.md), [deployment runbook](deploy/README.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, contact resolution, reminders, mail transport and an actual Lightsail deployment remain unimplemented; an outbox record is not evidence that mail was sent.
 
 ## Python connectivity check
 
@@ -24,6 +24,7 @@ Verified on 2026-09-10: deepseek-flash completed two native Chat Completions req
 - [Shared contracts v0.7](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
 - [Real LLM runtime](docs/llm-runtime.md): provider adapter, tool loop, errors, live mail and deployment requirements.
 - [Business acceptance](docs/business-acceptance.md): source review, seven rubric areas and business-connected acceptance scenarios.
+- [Single-host deployment](deploy/README.md): container topology, health checks, secret boundary, backup, restore and rollback.
 - [Synthetic examples](examples/README.md): fixtures for parallel development before integrations exist.
 
 ## Team ownership

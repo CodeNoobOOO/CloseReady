@@ -37,6 +37,8 @@ The application reads these two process environment variables; it does not autom
 
 Open http://127.0.0.1:8000/docs for API schemas. Use the Authorize button with the local API token if trying requests there. Documentation contains no case data; business endpoints require authentication. CORS is not enabled yet; use a same-origin frontend proxy for browser integration.
 
+Service supervisors may call `GET /health/live` and `GET /health/ready` without authentication. These endpoints return only process/storage status, never case or provider information. Readiness validates all application tables and performs a rollback-only write probe without calling the LLM.
+
 ## Try the complete persistence path
 
 In the original terminal holding `$apiToken`:
@@ -85,6 +87,8 @@ Stop and restart the server using the same database URL: the case, version, audi
 
 | Route | Purpose | Access |
 | --- | --- | --- |
+| GET /health/live | Process liveness; no business data | Public for service supervision |
+| GET /health/ready | Database/schema readiness; no LLM call | Public for service supervision |
 | POST /api/v1/cases | Create a configured checklist; 201 snapshot | Manager with client grant; valid owner and policy |
 | GET /api/v1/cases | Scoped page; items, next_cursor | Any actor with client grant |
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
@@ -111,10 +115,10 @@ Configuration is administrator-owned and loaded at startup; restart after rotati
 
 SQLite BEGIN IMMEDIATE serializes writers. Version comparison, snapshot update, successful audit and idempotent response commit together. A failed audit insert rolls back the snapshot and replay record. Denied/stale business mutations record a separate outcome without changing the case version. Denials with no accessible case have a null case_id and are retained internally, not exposed through another client's case audit route. HTTP authentication/schema rejections are not persisted in the business audit table in this increment.
 
-Schema version 1 initializes a new database; future migrations require an explicit migration implementation. This increment has no migration, retention, backup or recovery administration commands. JSON snapshots are internal storage, not a public database interface. Read/write through the API rather than sharing the SQLite file with group members.
+Schema version 1 initializes a new database; future migrations require an explicit migration implementation. This increment has no migration or retention administration commands. The [single-host deployment runbook](../deploy/README.md) documents an operator-controlled SQLite backup and restore drill. JSON snapshots are internal storage, not a public database interface. Read/write through the API rather than sharing the SQLite file with group members.
 
 ## Scope and deployment limits
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-For Lightsail, use `.venv/bin/python` and an absolute persistent database path. Run the API and `python -m closeready.worker` as separately supervised services against the same absolute database URL. This API has not been deployed: keep local development bound to loopback until TLS, secret provisioning, access logging, resource limits, backups and deployment tests are in place. The runtime now queues and recovers analysis work, but a complete business workflow still needs evidence ownership/verification, reminder reconciliation and mail integration.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis work, but a complete business workflow still needs evidence ownership/verification, reminder reconciliation and mail integration.

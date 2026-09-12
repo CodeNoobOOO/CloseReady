@@ -23,6 +23,7 @@ from .runtime_models import (
 from .runtime_store import RuntimeStore
 from .llm import LLMProvider
 from .provider_factory import provider_from_environment
+from .health import HealthStatus
 
 
 def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | None = None) -> FastAPI:
@@ -62,6 +63,18 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
             content={'error': {'code': code, 'message': message, 'retryable': retryable},
                      'request_id': request.state.request_id},
             headers={'WWW-Authenticate': 'Bearer'} if status == 401 else None)
+
+    @app.get('/health/live', response_model=HealthStatus, include_in_schema=True)
+    def live():
+        return HealthStatus(status='ok')
+
+    @app.get('/health/ready', response_model=HealthStatus, include_in_schema=True)
+    def ready():
+        try:
+            runtime_store.check_ready()
+        except (SQLAlchemyError, RuntimeError):
+            raise DomainError('NOT_READY', 'Persistent storage is not ready.', 503) from None
+        return HealthStatus(status='ready')
 
     @app.exception_handler(DomainError)
     async def domain_error(request: Request, exc: DomainError):

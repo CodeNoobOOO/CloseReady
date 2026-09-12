@@ -1,0 +1,71 @@
+name: closeready
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: closeready:local
+    env_file:
+      - ./runtime.env
+    environment:
+      CLOSEREADY_ACCESS_CONFIG: /run/secrets/server-config.json
+      CLOSEREADY_DATABASE_URL: sqlite:////data/closeready.db
+    volumes:
+      - closeready-data:/data
+      - ./secrets/server-config.json:/run/secrets/server-config.json:ro
+    ports:
+      - "${CLOSEREADY_PORT:-8000}:8000"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: closeready:local
+    command: ["python", "-m", "closeready.worker", "--poll-seconds", "2"]
+    env_file:
+      - ./runtime.env
+    environment:
+      CLOSEREADY_ACCESS_CONFIG: /run/secrets/server-config.json
+      CLOSEREADY_DATABASE_URL: sqlite:////data/closeready.db
+    volumes:
+      - closeready-data:/data
+      - ./secrets/server-config.json:/run/secrets/server-config.json:ro
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  closeready-data:

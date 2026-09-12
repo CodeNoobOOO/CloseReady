@@ -25,6 +25,9 @@ coverage/
 # Local data and generated traces
 uploads/
 local-data/
+deploy/runtime.env
+deploy/secrets/
+deploy/restore/
 *.db
 *.db-shm
 *.db-wal
