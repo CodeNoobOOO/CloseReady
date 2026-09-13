@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
@@ -31,6 +32,7 @@ from .communication_models import (
     IngestReplyResult, MailboxPage, ReminderPage, ReplyPage,
 )
 from .communication_store import CommunicationStore
+from pathlib import Path
 
 
 def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | None = None,
@@ -47,6 +49,17 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
             store.engine.dispose()
 
     app = FastAPI(title='CloseReady Case API', version='0.1.0', lifespan=lifespan)
+    @app.get('/app', include_in_schema=False)
+    def frontend():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'index.html')
+
+    @app.get('/app/app.js', include_in_schema=False)
+    def frontend_js():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'app.js', media_type='text/javascript')
+
+    @app.get('/app/style.css', include_in_schema=False)
+    def frontend_css():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'style.css', media_type='text/css')
     app.state.store = store
     app.state.runtime_store = runtime_store
     app.state.communication = communication

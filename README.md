@@ -21,6 +21,8 @@ Verified on 2026-09-10: deepseek-flash completed two native Chat Completions req
 
 ## Start here
 
+The Student 4 dashboard is served by the API at `/app` on the same origin. Enter a locally generated manager bearer token; the browser keeps it only in session storage. The dashboard reads case checklists, review tasks, approved outbox, sandbox mailbox, replies, commitments, reminders, run traces and audit records. It can approve/edit/reject communication drafts, deliver reviewed messages to the configured `test_sink`, ingest a trusted reply and assess it. Configure the local API and approved contact as described in [backend setup](docs/backend.md). Document upload, evidence correction, pause and final readiness confirmation await backend routes and are shown as unavailable. [Evaluation protocol](docs/evaluation.md) describes the labelled result format and scoring command; no measured outcomes are included yet.
+
 - [Shared contracts v0.8](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
 - [Sandbox communication](docs/communication.md): approved contacts, test_sink mailbox, reply ingest, commitments and reminders.
 - [Real LLM runtime](docs/llm-runtime.md): provider adapter, tool loop, errors, live mail and deployment requirements.
