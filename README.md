@@ -3,7 +3,7 @@ Agentic document collection and bookkeeping readiness for accounting firms.
 
 ## Current status
 
-An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. An authorised activation queues a durable event and run for a separately supervised worker; the configurable LLM loop reads the checklist and records a validated, assigned unsent draft/review task. DeepSeek has been live-tested. An assigned manager can approve, safely edit, reject or dismiss that task, and approval atomically creates a durable reviewed outbox record. Public data-free health checks, a non-root container image, a single-host API/worker Compose topology and deterministic CI are included. See [backend setup](docs/backend.md), [deployment runbook](deploy/README.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document/reply assessment, contact resolution, reminders, mail transport and an actual Lightsail deployment remain unimplemented; an outbox record is not evidence that mail was sent.
+An authenticated FastAPI backend persists cases, deadline changes, audit records and idempotent responses in SQLite. An authorised activation queues a durable event and run for a separately supervised worker; the configurable LLM loop reads the checklist and records a validated, assigned unsent draft/review task. DeepSeek has been live-tested. An assigned manager can approve, safely edit, reject or dismiss that task, and approval atomically creates a durable reviewed outbox record. With `CLOSEREADY_MAIL_BACKEND=test_sink` and administrator contacts, Student 3 can sandbox-deliver that outbox item, ingest a trusted reply, assess it, record a commitment and schedule or cancel reminders. The sandbox is labeled and is not live mail. See [backend setup](docs/backend.md), [sandbox communication](docs/communication.md), [team model configuration](docs/llm-providers.md), [live agent setup and evidence](docs/agent-runtime.md) and [Python models](docs/python-models.md). Document assessment, live mail transport and deployment remain unimplemented; a sandbox mailbox row is not evidence that mail was sent.
 
 ## Python connectivity check
 
@@ -21,7 +21,8 @@ Verified on 2026-09-10: deepseek-flash completed two native Chat Completions req
 
 ## Start here
 
-- [Shared contracts v0.7](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
+- [Shared contracts v0.8](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
+- [Sandbox communication](docs/communication.md): approved contacts, test_sink mailbox, reply ingest, commitments and reminders.
 - [Real LLM runtime](docs/llm-runtime.md): provider adapter, tool loop, errors, live mail and deployment requirements.
 - [Business acceptance](docs/business-acceptance.md): source review, seven rubric areas and business-connected acceptance scenarios.
 - [Single-host deployment](deploy/README.md): container topology, health checks, secret boundary, backup, restore and rollback.

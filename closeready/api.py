@@ -22,13 +22,22 @@ from .runtime_models import (
 )
 from .runtime_store import RuntimeStore
 from .llm import LLMProvider
+from .mail import MailBackend, mail_backend
 from .provider_factory import provider_from_environment
 from .health import HealthStatus
+from .communication_models import (
+    AssessReplyRequest, AssessReplyResult, CommitmentPage, DeliverOutboxRequest,
+    DeliveryResult, DispatchRemindersResult, FindingPage, IngestReplyRequest,
+    IngestReplyResult, MailboxPage, ReminderPage, ReplyPage,
+)
+from .communication_store import CommunicationStore
 
 
-def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | None = None) -> FastAPI:
+def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | None = None,
+               mail: MailBackend | None = None) -> FastAPI:
     store = Store(database_url, access)
     runtime_store = RuntimeStore(store)
+    communication = CommunicationStore(store, runtime_store, mail)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -40,6 +49,7 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     app = FastAPI(title='CloseReady Case API', version='0.1.0', lifespan=lifespan)
     app.state.store = store
     app.state.runtime_store = runtime_store
+    app.state.communication = communication
     bearer = HTTPBearer(auto_error=False)
 
     def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> Principal:
@@ -162,6 +172,54 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
                     limit: Annotated[int, Query(ge=1, le=100)] = 50):
         return runtime_store.outbox_records(actor, case_id, cursor, limit)
 
+    @app.post('/api/v1/cases/{case_id}/outbox/{outbox_id}/deliver', response_model=DeliveryResult)
+    def deliver_outbox(case_id: str, outbox_id: str, actor: Actor, key: Key,
+                       body: DeliverOutboxRequest = DeliverOutboxRequest()):
+        return communication.deliver_outbox(actor, case_id, outbox_id, body, key)
+
+    @app.get('/api/v1/cases/{case_id}/mailbox', response_model=MailboxPage)
+    def list_mailbox(case_id: str, actor: Actor,
+                     cursor: Annotated[str | None, Query(max_length=128)] = None,
+                     limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_mailbox(actor, case_id, cursor, limit)
+
+    @app.post('/api/v1/cases/{case_id}/replies', response_model=IngestReplyResult, status_code=201)
+    def ingest_reply(case_id: str, body: IngestReplyRequest, actor: Actor, key: Key):
+        return communication.ingest_reply(actor, case_id, body, key)
+
+    @app.get('/api/v1/cases/{case_id}/replies', response_model=ReplyPage)
+    def list_replies(case_id: str, actor: Actor,
+                     cursor: Annotated[str | None, Query(max_length=128)] = None,
+                     limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_replies(actor, case_id, cursor, limit)
+
+    @app.post('/api/v1/cases/{case_id}/replies/{reply_id}/assess', response_model=AssessReplyResult)
+    def assess_reply(case_id: str, reply_id: str, body: AssessReplyRequest, actor: Actor, key: Key):
+        return communication.assess_reply(
+            actor, case_id, reply_id, body.expected_state_version, key, provider)
+
+    @app.get('/api/v1/cases/{case_id}/findings', response_model=FindingPage)
+    def list_findings(case_id: str, actor: Actor,
+                      cursor: Annotated[str | None, Query(max_length=128)] = None,
+                      limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_findings(actor, case_id, cursor, limit)
+
+    @app.get('/api/v1/cases/{case_id}/commitments', response_model=CommitmentPage)
+    def list_commitments(case_id: str, actor: Actor,
+                         cursor: Annotated[str | None, Query(max_length=128)] = None,
+                         limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_commitments(actor, case_id, cursor, limit)
+
+    @app.get('/api/v1/cases/{case_id}/reminders', response_model=ReminderPage)
+    def list_reminders(case_id: str, actor: Actor,
+                       cursor: Annotated[str | None, Query(max_length=128)] = None,
+                       limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_reminders(actor, case_id, cursor, limit)
+
+    @app.post('/api/v1/cases/{case_id}/reminders/dispatch-due', response_model=DispatchRemindersResult)
+    def dispatch_reminders(case_id: str, actor: Actor, key: Key):
+        return communication.dispatch_due_reminders(actor, case_id, key)
+
     return app
 
 
@@ -171,4 +229,5 @@ def from_env() -> FastAPI:
     if not path or not database_url:
         raise RuntimeError('Set CLOSEREADY_ACCESS_CONFIG and CLOSEREADY_DATABASE_URL; see docs/backend.md.')
     provider = provider_from_environment() if os.environ.get('CLOSEREADY_LLM_ENABLED') == '1' else None
-    return create_app(database_url, load_access_config(path), provider=provider)
+    return create_app(database_url, load_access_config(path), provider=provider,
+                      mail=mail_backend(os.environ.get('CLOSEREADY_MAIL_BACKEND')))

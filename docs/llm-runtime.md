@@ -1,6 +1,6 @@
 # Real LLM runtime and integration contract
 
-Status: partially implemented. Durable activation now queues work for a separately supervised worker; the live case-analysis loop reads persisted checklists, validates proposals and stores assigned unsent draft/review tasks with run/audit records. See [implemented runtime and live check](agent-runtime.md) for limits and evidence. Document/reply assessment, actual communication, reminder scheduling and deployment remain outstanding; the full contract below is not yet fulfilled. Owner: Student 1. Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
+Status: partially implemented. Durable activation now queues work for a separately supervised worker; the live case-analysis loop reads persisted checklists, validates proposals and stores assigned unsent draft/review tasks with run/audit records. Student 3 can sandbox-deliver an approved outbox item and run a separate reply-assessment tool loop. See [implemented runtime and live check](agent-runtime.md) and [sandbox communication](communication.md). Document assessment, actual provider mail and deployment remain outstanding; the full contract below is not yet fulfilled. Owner: Student 1 (loop/gate) and Student 3 (mail adapter, reply assessment). Source intent: Problem.docx, judging rubric.docx, plan b.docx and the four-student Plan B execution plan.
 
 ## Required outcome
 
@@ -44,7 +44,7 @@ Initial semantic decisions are document matching, evidence adequacy, reply inten
 | submit_reply_assessment | Validate and persist reply finding | Evidence record only; does not waive or accept |
 | propose_action | Request a typed business action from contracts.md | Full application gate; result returned to model |
 
-Implement these with executable typed request/response schemas, not free-form dictionaries. Action payloads are now discriminated by action_type in Pydantic. get_case_context and propose_action are implemented for the limited analysis loop; the evidence and assessment tools above remain planned.
+Implement these with executable typed request/response schemas, not free-form dictionaries. Action payloads are now discriminated by action_type in Pydantic. get_case_context and propose_action are implemented for the limited analysis loop. get_reply_evidence and submit_reply_assessment are implemented for the Student 3 reply-assessment loop; they are not yet tools on the case-analysis agent. Document evidence tools remain planned.
 
 ## Live mail and uploaded documents
 

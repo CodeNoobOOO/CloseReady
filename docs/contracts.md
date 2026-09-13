@@ -1,6 +1,18 @@
-# CloseReady shared contracts v0.8
+# CloseReady shared contracts v0.9
 
-Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions, a reviewed-message outbox and a single-host deployment package are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Document/reply assessment, contact resolution, communication delivery and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. Document assessment, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+
+## v0.9 sandbox communication increment
+
+- Access configuration may include administrator `contacts` and `communication_policies`. Existing files without those arrays remain valid and keep mail disabled. A case uses the communication policy whose `policy_id` and `version` match its captured policy binding.
+- `CLOSEREADY_MAIL_BACKEND=test_sink` enables the labeled sandbox mailbox. It is not SMTP or a live provider. Omit the variable or set `disabled` to leave outbox items unsent. Other backend names fail process start.
+- `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` is manager-only, idempotent and separate from review approval. It resolves one active approved contact, rechecks outstanding drafted items, the sending window and the customer-visible guard, then records `delivery_status` `sent`, `failed` or `delivery_unknown` on the existing outbox record. `live` on the result is always false in this increment.
+- `GET /api/v1/cases/{case_id}/mailbox` lists sandbox messages for the case. Presence of a mailbox row is not evidence of external delivery.
+- `POST /api/v1/cases/{case_id}/replies` is authenticated trusted ingest. The sender must match an active approved contact for that client. Unknown senders are quarantined with an assigned `UNKNOWN_SENDER` review and are omitted from `GET .../replies`. There is no unauthenticated inbound-mail route.
+- `POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` runs the reply-assessment tool loop (`get_reply_evidence`, `submit_reply_assessment`) on the process LLM provider. Application code persists `ReplyAssessment`, may record a `Commitment` and schedule a reminder, or opens a policy review. It never accepts, waives or confirms readiness. Scripted tests use `scripted_test` with `live=false`.
+- `GET .../findings` currently lists reply assessments only. Document findings remain a Student 2 increment.
+- `GET .../commitments` and `GET .../reminders` are implemented. `POST .../reminders/dispatch-due` sends due sandbox reminders after rechecking outstanding items, duplicate keys, interval/limit policy and the sending window. Obsolete mixed-item reminders are cancelled rather than sent.
+- The Student 1 analysis loop still stores request drafts as unsent review tasks with `MAIL_NOT_CONFIGURED`. Approval still creates `delivery_status=not_attempted`. Student 3 extends delivery through the deliver route rather than a model send tool.
 
 ## v0.8 deployment foundation increment
 
@@ -192,14 +204,14 @@ Each audit entry records event/run IDs, actor, action, outcome, evidence or poli
 - Document: document_id, case_id, file_hash, storage_ref, original_filename, content_type, extraction_status, extracted_artifact_ref, uploaded_by, uploaded_at. Storage refs are application-managed, not arbitrary paths or URLs supplied to tools.
 - Reply: reply_id, case_id, provider_message_id, conversation_ref, sender_contact_id, received_at, body_ref, attachment_document_ids. Unknown or ambiguous associations are quarantined for review before the agent sees another client's context.
 - ReviewTask: review_task_id, case_id, run_id, requirement_ids, reason_code, reason, assigned_to, status (open/resolved), nullable draft, sent=false, created_at, resolution, resolved_by, resolved_at, resolution_reason and nullable approved_draft. Exhausted retries and escalation thresholds must create an assigned task, not only a log line.
-- Reviewed outbox: outbox_id, case_id, review_task_id, requirement_ids, guarded subject/body, status=pending_reviewed_delivery, recipient_contact_id=null, provider_message_id=null, created_by, created_at and delivery_status=not_attempted. Student 3 extends delivery through a separate controlled interface rather than mutating this record through the model.
+- Reviewed outbox: outbox_id, case_id, review_task_id, requirement_ids, guarded subject/body, status=pending_reviewed_delivery, recipient_contact_id (null until Student 3 delivery), provider_message_id (null until a sandbox or later provider attempt), created_by, created_at and delivery_status (`not_attempted`, `queued`, `sent`, `failed`, `delivery_unknown`). Student 3 updates delivery through `POST .../outbox/{outbox_id}/deliver`, not through the model.
 - Reminder: reminder_id, case_id, requirement_ids, scheduled_at, status, dedupe_key, contact_id, policy_version, source_commitment_id (nullable), attempt_count. The resolved recipient is recorded in restricted execution history.
 
 Owner and deadline enable overdue sorting and escalation. Clients can have multiple accounts, periods and requirements; do not hard-code a single July bank statement.
 
 ## Frontend HTTP contract — Student 4
 
-All routes below have prefix /api/v1. Case creation/listing/retrieval, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing and audit retrieval are available from this table; other routes remain planned. Deadline, analysis and recovery routes are additionally available as specified above.
+All routes below have prefix /api/v1. Case creation/listing/retrieval, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing, sandbox delivery/mailbox, trusted reply ingest, reply assessment, findings (reply assessments only), commitments, reminders and audit retrieval are available from this table; document upload and readiness confirmation remain planned. Deadline, analysis and recovery routes are additionally available as specified above.
 
 | Method and route | Purpose | Response |
 | --- | --- | --- |
@@ -209,13 +221,19 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, run retri
 | POST /cases/{case_id}/activate | Queue authorised initial-request analysis with expected_state_version | 202: queued RunRecord |
 | POST /cases/{case_id}/documents | Multipart file upload with optional requirement_id | 202: document_id, event_id, run_id |
 | GET /runs/{run_id} | Poll processing | 200: run record |
-| GET /cases/{case_id}/findings | Evidence assessments | 200: items and next_cursor |
+| GET /cases/{case_id}/findings | Reply assessments in this increment; document findings remain planned | 200: items and next_cursor |
 | GET /cases/{case_id}/review-tasks | Pending and resolved review tasks | 200: items and next_cursor |
 | POST /cases/{case_id}/review-decisions | Resolve a communication-draft or operational-error review | 200: resolved review task |
-| GET /cases/{case_id}/outbox | List reviewed messages awaiting communication integration | 200: items and next_cursor |
+| GET /cases/{case_id}/outbox | List reviewed messages awaiting or after communication integration | 200: items and next_cursor |
+| POST /cases/{case_id}/outbox/{outbox_id}/deliver | Sandbox-send an approved outbox item to an approved contact | 200: delivery result (`live=false`) |
+| GET /cases/{case_id}/mailbox | List labeled sandbox mailbox messages for the case | 200: items and next_cursor |
+| POST /cases/{case_id}/replies | Trusted ingest of a client reply after sender/case association | 201: associated reply or quarantined review |
+| GET /cases/{case_id}/replies | Agent-visible associated replies | 200: items and next_cursor |
+| POST /cases/{case_id}/replies/{reply_id}/assess | Live/scripted reply assessment and application effects | 200: finding, optional commitment/reminder, optional review_task_id |
 | POST /cases/{case_id}/confirm-readiness | Human readiness confirmation | 200: updated case snapshot |
 | GET /cases/{case_id}/audit-events | Audit history | 200: items and next_cursor |
 | GET /cases/{case_id}/reminders | Scheduled and completed follow-up | 200: items and next_cursor |
+| POST /cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders after policy recheck | 200: dispatched reminder records |
 | GET /cases/{case_id}/commitments | Client commitments | 200: items and next_cursor |
 
 Case creation takes client_id, accounting_period, timezone, owner_user_id, due_at, policy_id and requirement definitions. Validate owner access and persist the selected policy version. The backend supplies case IDs, versions and initial statuses. Do not accept caller-supplied readiness or reviewer approval.

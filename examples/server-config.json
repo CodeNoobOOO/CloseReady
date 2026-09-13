@@ -15,5 +15,29 @@
       "approved_by": "user_manager_demo",
       "approved_at": "2026-09-10T00:00:00Z"
     }
+  ],
+  "contacts": [
+    {
+      "contact_id": "contact_demo",
+      "client_id": "client_demo",
+      "approved_email": "client@example.test",
+      "active": true,
+      "approved_by": "user_manager_demo"
+    }
+  ],
+  "communication_policies": [
+    {
+      "policy_id": "policy_demo",
+      "version": 1,
+      "approved_by": "user_manager_demo",
+      "approved_at": "2026-09-10T00:00:00Z",
+      "initial_request_enabled": true,
+      "min_reminder_interval_hours": 24,
+      "max_reminders_per_requirement": 3,
+      "commitment_grace_hours": 24,
+      "sending_window_local": "00:00-23:59",
+      "timezone": "Asia/Singapore",
+      "escalation_owner_user_id": "user_manager_demo"
+    }
   ]
 }

@@ -79,7 +79,7 @@ $resolved | ConvertTo-Json -Depth 12
 $outboxPage | ConvertTo-Json -Depth 12
 ```
 
-The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery`, no recipient, and `delivery_status=not_attempted`. No email is sent. Student 3 must later resolve an approved contact and implement a separately controlled delivery lifecycle. Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
+The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery` and starts with `delivery_status=not_attempted` and no recipient. That is not a send. To exercise the Week 1 sandbox path, set `CLOSEREADY_MAIL_BACKEND=test_sink`, restart the API, and follow [sandbox communication](communication.md). Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
 
 Stop and restart the server using the same database URL: the case, version, audit history and successful idempotent responses remain. Repeating an identical mutation with its original key returns the original snapshot without another mutation. To see a stale rejection, repeat the deadline request with a new key and the old expected_state_version=1.
 
@@ -97,7 +97,16 @@ Stop and restart the server using the same database URL: the case, version, audi
 | POST /api/v1/cases/{case_id}/activate | Persist case_activated event and queued run; 202 | Manager with client grant; configured provider |
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
-| GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages; no delivery claim | Actor with client grant |
+| GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Sandbox delivery of an approved outbox item | Assigned manager; `test_sink` |
+| GET /api/v1/cases/{case_id}/mailbox | Labeled sandbox messages; `live=false` | Actor with client grant; `test_sink` |
+| POST /api/v1/cases/{case_id}/replies | Trusted reply ingest | Manager with client grant |
+| GET /api/v1/cases/{case_id}/replies | Associated replies | Actor with client grant |
+| POST /api/v1/cases/{case_id}/replies/{reply_id}/assess | Reply assessment + commitment/reminder effects | Manager; LLM enabled |
+| GET /api/v1/cases/{case_id}/findings | Reply assessments | Actor with client grant |
+| GET /api/v1/cases/{case_id}/commitments | Recorded commitments | Actor with client grant |
+| GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
+| POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders | Manager; `test_sink` |
 
 List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Keys are scoped by actor and operation (including the case for deadline updates). Replays preserve the original response, which may be older than the current case; GET the case for current state.
 
@@ -109,7 +118,7 @@ Errors use the shared error envelope and a generated request_id, also returned a
 
 ## Access and transaction boundary
 
-Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not the full reminder policy implementation and cannot enable sending.
+Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not editable by HTTP callers. Reminder intervals, sending windows and approved recipients live on `communication_policies` and `contacts` in the same access file; see [sandbox communication](communication.md). Without those records and `CLOSEREADY_MAIL_BACKEND=test_sink`, approval still cannot send.
 
 Configuration is administrator-owned and loaded at startup; restart after rotating tokens or changing grants. Case records retain their original policy version. Revoking access prevents idempotent response replay for that client. HTTP callers cannot edit access grants or policy bindings. The repository assumes Principal objects came from this trusted authentication layer; it is not an untrusted tool entry point.
 
@@ -121,4 +130,4 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis work, but a complete business workflow still needs evidence ownership/verification, reminder reconciliation and mail integration.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis work and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs document evidence, live mail transport and an actual Lightsail deployment.

@@ -131,6 +131,42 @@ class RuntimeStore:
         return OutboxPage(items=[OutboxRecord.model_validate_json(row['record']) for row in rows[:limit]],
             next_cursor=rows[limit - 1]['outbox_id'] if len(rows) > limit else None)
 
+    def load_outbox(self, conn, actor, case_id, outbox_id):
+        self.store._case(conn, actor, case_id)
+        raw = conn.execute(select(outbox.c.record).where(
+            outbox.c.outbox_id == outbox_id, outbox.c.case_id == case_id)).scalar_one_or_none()
+        if raw is None:
+            raise DomainError('NOT_FOUND', 'Outbox record not found.', 404)
+        return OutboxRecord.model_validate_json(raw)
+
+    def save_outbox(self, conn, record):
+        conn.execute(update(outbox).where(outbox.c.outbox_id == record.outbox_id).values(
+            record=record.model_dump_json()))
+
+    def create_policy_review(self, conn, actor, case, reason_code, reason, requirement_ids, key):
+        """Assigned review from communication policy. Completes without calling a provider."""
+        existing = conn.execute(select(runs).where(runs.c.actor_id == actor.user_id,
+            runs.c.case_id == case.case_id, runs.c.key == key)).mappings().one_or_none()
+        if existing:
+            raw = conn.execute(select(reviews.c.record).where(
+                reviews.c.run_id == existing['run_id'])).scalar_one_or_none()
+            if raw:
+                return ReviewTaskRecord.model_validate_json(raw)
+        run_id, event_id = 'run_' + uuid4().hex, 'event_' + uuid4().hex
+        record = RunRecord(run_id=run_id, event_id=event_id, case_id=case.case_id,
+            start_state_version=case.state_version, status='completed',
+            started_at=now(), finished_at=now(), provider='communication_policy',
+            model='none', live=False, prompt_version='n/a', schema_version='0.8',
+            error_code=reason_code)
+        conn.execute(insert(events).values(event_id=event_id, case_id=case.case_id, record=json.dumps({
+            'type': 'communication_policy_review', 'occurred_at': now(), 'case_id': case.case_id,
+            'actor_user_id': actor.user_id, 'reason_code': reason_code})))
+        conn.execute(insert(runs).values(run_id=run_id, case_id=case.case_id, actor_id=actor.user_id,
+            key=key, expected_version=case.state_version, status='completed',
+            record=record.model_dump_json()))
+        row = conn.execute(select(runs).where(runs.c.run_id == run_id)).mappings().one()
+        return self._review(conn, actor, row, case, reason_code, requirement_ids, reason=reason)
+
     @staticmethod
     def _decision_digest(request):
         canonical = json.dumps(request.model_dump(mode='json'), sort_keys=True, separators=(',', ':'))

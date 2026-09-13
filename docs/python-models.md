@@ -37,15 +37,15 @@ print(proposal.model_dump_json())  # Flat JSON: there is no "root" wrapper on th
 
 `model_validate()` accepts Python dictionaries; `model_validate_json()` accepts JSON. Catch `pydantic.ValidationError` at the API/tool boundary and return a safe field-level error. Avoid logging raw validation input because it can contain client data. Validation is not execution authorization.
 
-Student 2 imports EvidenceRef and reads CaseSnapshot/Requirement. Student 3 uses MessageDraft and the action content variants. Student 4 can consume JSON Schema and the synthetic JSON examples. DocumentAssessment and ReplyAssessment are still documented contracts, not implemented Python models in this increment.
+Student 2 imports EvidenceRef and reads CaseSnapshot/Requirement. Student 3 uses MessageDraft, ReplyAssessment, ReplyAssessmentContent and the action content variants. Student 4 can consume JSON Schema and the synthetic JSON examples. DocumentAssessment remains a documented contract, not an implemented Python model in this increment.
 
 Generate standard JSON Schema directly, for example:
 
 ```python
 import json
-from closeready.models import CaseSnapshot, Requirement, EvidenceRef, ActionContent, ActionProposal
+from closeready.models import CaseSnapshot, Requirement, EvidenceRef, ActionContent, ActionProposal, ReplyAssessment
 
-for model in (CaseSnapshot, Requirement, EvidenceRef, ActionContent, ActionProposal):
+for model in (CaseSnapshot, Requirement, EvidenceRef, ActionContent, ActionProposal, ReplyAssessment):
     print(json.dumps(model.model_json_schema(), indent=2))
 ```
 

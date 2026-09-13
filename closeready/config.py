@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, StringConstraints, model_validator
+from .communication_models import CommunicationPolicy, Contact
 from .models import ContractModel, PositiveInt, Text, Timestamp
 
 
@@ -16,7 +17,7 @@ class Principal(ContractModel):
 
 
 class PolicyBinding(ContractModel):
-    """Approved version identity only; communication settings are a later module."""
+    """Approved version identity. Reminder/send settings live on CommunicationPolicy."""
     policy_id: Text
     version: PositiveInt
     client_ids: frozenset[Text]
@@ -27,15 +28,32 @@ class PolicyBinding(ContractModel):
 class AccessConfig(ContractModel):
     principals: Annotated[tuple[Principal, ...], Field(min_length=1)]
     policies: Annotated[tuple[PolicyBinding, ...], Field(min_length=1)]
+    contacts: tuple[Contact, ...] = ()
+    communication_policies: tuple[CommunicationPolicy, ...] = ()
 
     @model_validator(mode='after')
     def unique_configuration(self):
         for values in ([p.user_id for p in self.principals],
                        [p.token_sha256 for p in self.principals],
-                       [p.policy_id for p in self.policies]):
+                       [p.policy_id for p in self.policies],
+                       [c.contact_id for c in self.contacts]):
             if len(values) != len(set(values)):
                 raise ValueError('Duplicate configuration identity')
+        policy_versions = [(p.policy_id, p.version) for p in self.communication_policies]
+        if len(policy_versions) != len(set(policy_versions)):
+            raise ValueError('Duplicate communication policy version')
+        emails = [(c.client_id, c.approved_email.lower()) for c in self.contacts]
+        if len(emails) != len(set(emails)):
+            raise ValueError('Duplicate approved email for a client')
         return self
+
+    def contacts_for(self, client_id: str, *, active_only=True) -> tuple[Contact, ...]:
+        return tuple(c for c in self.contacts
+                     if c.client_id == client_id and (c.active or not active_only))
+
+    def communication_policy(self, policy_id: str, version: int) -> CommunicationPolicy | None:
+        return next((p for p in self.communication_policies
+                     if p.policy_id == policy_id and p.version == version), None)
 
     def authenticate(self, token: str) -> Principal | None:
         digest = hashlib.sha256(token.encode()).hexdigest()

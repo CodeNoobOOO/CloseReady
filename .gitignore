@@ -7,6 +7,7 @@
 
 # Python
 .venv/
+.venv-run/
 venv/
 __pycache__/
 *.py[cod]

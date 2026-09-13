@@ -291,3 +291,40 @@ class ActionProposal(RootModel[ProposalUnion]):
     @property
     def action_type(self):
         return self.root.action_type
+
+
+ReplyIntent = Literal[
+    'submission_commitment', 'document_submitted', 'question', 'dispute',
+    'waiver_request', 'other',
+]
+
+
+class ReplyAssessmentContent(ContractModel):
+    """Model-facing reply judgement. Parsing does not record a commitment or send mail."""
+    intent: ReplyIntent
+    requirement_ids: list[Text]
+    promised_at: Timestamp | None
+    needs_clarification: Annotated[bool, Field(strict=True)]
+    uncertainty_reasons: list[Text]
+    evidence_excerpt: Text
+
+    @model_validator(mode='after')
+    def consistent_reply_judgement(self):
+        if len(self.requirement_ids) != len(set(self.requirement_ids)):
+            raise ValueError('Requirement IDs must be unique')
+        if self.needs_clarification and not self.uncertainty_reasons:
+            raise ValueError('Clarification requires at least one uncertainty reason')
+        if self.intent == 'submission_commitment' and self.promised_at is None:
+            if not self.needs_clarification:
+                raise ValueError('A commitment without a promised time requires clarification')
+        if self.intent in ('dispute', 'waiver_request') and self.promised_at is not None:
+            raise ValueError('Dispute and waiver judgements cannot record a promised time')
+        return self
+
+
+class ReplyAssessment(ReplyAssessmentContent):
+    finding_id: Text
+    responsibility: Literal['reply_assessment'] = 'reply_assessment'
+    case_id: Text
+    input_state_version: PositiveInt
+    reply_id: Text

@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 from pydantic import ValidationError
-from closeready.models import CaseSnapshot, EvidenceRef, ActionProposal, ActionContent
+from closeready.models import CaseSnapshot, EvidenceRef, ActionProposal, ActionContent, ReplyAssessment, ReplyAssessmentContent
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -98,6 +98,21 @@ class ContractTests(unittest.TestCase):
         schema = ActionProposal.model_json_schema()
         self.assertIn('discriminator', schema)
         self.assertEqual(len(schema['oneOf']), 7)
+
+    def test_reply_assessment_fixture_and_model_content_split(self):
+        data = fixture('reply-assessment')
+        finding = ReplyAssessment.model_validate(data)
+        self.assertEqual(finding.responsibility, 'reply_assessment')
+        self.assertEqual(finding.intent, 'submission_commitment')
+        with self.assertRaises(ValidationError):
+            ReplyAssessmentContent.model_validate(data)
+        content = {k: data[k] for k in (
+            'intent', 'requirement_ids', 'promised_at', 'needs_clarification',
+            'uncertainty_reasons', 'evidence_excerpt')}
+        self.assertEqual(ReplyAssessmentContent.model_validate(content).intent, 'submission_commitment')
+        unclear = dict(content, promised_at=None, needs_clarification=False)
+        with self.assertRaises(ValidationError):
+            ReplyAssessmentContent.model_validate(unclear)
 
 
 if __name__ == '__main__':

@@ -110,7 +110,7 @@ class OutboxRecord(ContractModel):
     provider_message_id: Text | None = None
     created_by: Text
     created_at: Timestamp
-    delivery_status: Literal['not_attempted'] = 'not_attempted'
+    delivery_status: Literal['not_attempted', 'queued', 'sent', 'failed', 'delivery_unknown'] = 'not_attempted'
 
 
 class OutboxPage(ContractModel):

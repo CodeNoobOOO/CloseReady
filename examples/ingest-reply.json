@@ -1,0 +1,6 @@
+{
+  "expected_state_version": 3,
+  "sender_email": "client@example.test",
+  "received_at": "2026-09-11T09:00:00+08:00",
+  "body": "I will send the July statement on 11 September 2026 by 5 pm Singapore time."
+}
