@@ -4,6 +4,26 @@ CloseReady keeps communication decisions separate from transport. The case-analy
 
 The current communication backend is `test_sink`. It exercises contact resolution, sending windows, idempotency, delivery state and audit records without contacting an external mail server. A successful sandbox delivery is stored in `sandbox_mailbox` and returns `live=false`; it must never be presented as evidence that a real email was sent.
 
+## Case association contract
+
+Every new Case receives one active customer-visible reference in the same transaction as Case creation. The value has the form `CR-2607-X7K9Q2AB`: the middle segment identifies the accounting period and the final eight characters are random. Existing databases are backfilled when the Store starts. The mapping lives in `case_communication_refs`, separately from the public `CaseSnapshot` contract.
+
+Authenticated case users can read the reference through:
+
+```http
+GET /api/v1/cases/{case_id}/communication-reference
+```
+
+Student 3's inbound adapter must call the Store boundary:
+
+```python
+resolution = store.resolve_case_reference(public_reference, sender_email)
+```
+
+A successful `CaseReferenceResolution` contains `case_id`, `client_id` and `contact_id`. A failed result contains only `REFERENCE_NOT_FOUND`, `REFERENCE_REVOKED` or `SENDER_NOT_APPROVED` and discloses no internal identifiers. The resolver accepts case-insensitive references and email addresses, but reference knowledge alone never authorises access.
+
+Inbound association should first use a trusted provider thread or `In-Reply-To` mapping when available, then fall back to the customer-visible reference. Student 3 owns extraction of those mail fields; Student 1 owns the reference mapping and approved-sender validation. Unmatched results must be quarantined rather than guessed from the sender alone.
+
 ## Configuration
 
 Set this only in the ignored runtime environment file:
@@ -25,7 +45,7 @@ The administrator-controlled access file must contain:
 
 1. `POST /api/v1/cases/{case_id}/activate` queues case analysis.
 2. The worker lets the LLM read the authorised case and propose one typed action.
-3. A document request becomes an open review task and increases `state_version`.
+3. A document request becomes an open review task and increases `state_version`. The delivery adapter can read the Case's customer-visible reference and add it deterministically to the external message.
 4. `POST /api/v1/cases/{case_id}/review-decisions` lets the assigned manager approve, edit and approve, or reject the draft.
 5. Approval creates one outbox item. It still has not been sent.
 6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks the sending policy and customer-visible content, and invokes `test_sink`.

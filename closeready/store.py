@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import secrets
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 
 from .case_requests import AuditPage, CasePage, ChangeDeadlineRequest, CreateCaseRequest
+from .case_references import CaseCommunicationReference, CaseReferenceResolution
 from .config import AccessConfig, Principal
 from .models import CaseSnapshot
 
@@ -32,7 +34,15 @@ responses = Table('idempotent_responses', metadata,
     Column('key', String, primary_key=True),
     Column('request_hash', String, nullable=False),
     Column('response', SQLText, nullable=False))
+case_communication_refs = Table('case_communication_refs', metadata,
+    Column('public_reference', String, primary_key=True),
+    Column('case_id', String, nullable=False, unique=True, index=True),
+    Column('client_id', String, nullable=False, index=True),
+    Column('status', String, nullable=False),
+    Column('record', SQLText, nullable=False))
 schema = Table('schema_version', metadata, Column('version', Integer, primary_key=True))
+
+REFERENCE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 
 class DomainError(Exception):
@@ -59,6 +69,43 @@ class Store:
                 conn.execute(insert(schema).values(version=1))
             elif versions != [1]:
                 raise RuntimeError('Unsupported database schema version; migration required.')
+            self._backfill_case_references(conn)
+
+    def _new_case_reference(self, conn, case: CaseSnapshot, created_by: str):
+        period = case.accounting_period.replace('-', '')[2:]
+        for _attempt in range(10):
+            suffix = ''.join(secrets.choice(REFERENCE_ALPHABET) for _ in range(8))
+            public_reference = f'CR-{period}-{suffix}'
+            exists = conn.execute(select(case_communication_refs.c.public_reference).where(
+                case_communication_refs.c.public_reference == public_reference)).first()
+            if exists is None:
+                return CaseCommunicationReference(
+                    public_reference=public_reference,
+                    case_id=case.case_id,
+                    client_id=case.client_id,
+                    status='active',
+                    created_at=datetime.now(timezone.utc),
+                    created_by=created_by,
+                )
+        raise RuntimeError('Could not allocate a unique communication reference.')
+
+    def _insert_case_reference(self, conn, case: CaseSnapshot, created_by: str):
+        record = self._new_case_reference(conn, case, created_by)
+        conn.execute(insert(case_communication_refs).values(
+            public_reference=record.public_reference,
+            case_id=record.case_id,
+            client_id=record.client_id,
+            status=record.status,
+            record=record.model_dump_json(),
+        ))
+        return record
+
+    def _backfill_case_references(self, conn):
+        existing = set(conn.execute(select(case_communication_refs.c.case_id)).scalars())
+        for raw in conn.execute(select(cases.c.snapshot)).scalars():
+            case = CaseSnapshot.model_validate_json(raw)
+            if case.case_id not in existing:
+                self._insert_case_reference(conn, case, 'system:migration')
 
     def check_ready(self, additional_tables=()) -> None:
         """Raise unless expected schema and a rollback-only write are usable."""
@@ -95,6 +142,38 @@ class Store:
     def get_case(self, actor: Principal, case_id: str) -> CaseSnapshot:
         with self.engine.connect() as conn:
             return self._case(conn, actor, case_id)
+
+    def case_communication_reference(
+            self, actor: Principal, case_id: str) -> CaseCommunicationReference:
+        with self.engine.connect() as conn:
+            self._case(conn, actor, case_id)
+            raw = conn.execute(select(case_communication_refs.c.record).where(
+                case_communication_refs.c.case_id == case_id)).scalar_one_or_none()
+        if raw is None:
+            raise RuntimeError('Case communication reference is missing.')
+        return CaseCommunicationReference.model_validate_json(raw)
+
+    def resolve_case_reference(self, public_reference: str, sender_email: str):
+        canonical = public_reference.strip().upper() if isinstance(public_reference, str) else ''
+        with self.engine.connect() as conn:
+            raw = conn.execute(select(case_communication_refs.c.record).where(
+                case_communication_refs.c.public_reference == canonical)).scalar_one_or_none()
+        if raw is None:
+            return CaseReferenceResolution(matched=False, reason_code='REFERENCE_NOT_FOUND')
+        reference = CaseCommunicationReference.model_validate_json(raw)
+        if reference.status != 'active':
+            return CaseReferenceResolution(matched=False, reason_code='REFERENCE_REVOKED')
+        sender = sender_email.strip().lower() if isinstance(sender_email, str) else ''
+        contact = next((candidate for candidate in self.access.contacts_for(reference.client_id)
+            if candidate.approved_email.lower() == sender), None)
+        if contact is None:
+            return CaseReferenceResolution(matched=False, reason_code='SENDER_NOT_APPROVED')
+        return CaseReferenceResolution(
+            matched=True,
+            case_id=reference.case_id,
+            client_id=reference.client_id,
+            contact_id=contact.contact_id,
+        )
 
     def list_cases(self, actor: Principal, cursor: str | None, limit: int) -> CasePage:
         query = select(cases.c.snapshot).where(cases.c.client_id.in_(actor.client_ids))
@@ -162,6 +241,7 @@ class Store:
                     'requirements': [r.to_requirement('req_' + uuid4().hex) for r in request.requirements]})
                 conn.execute(insert(cases).values(case_id=result.case_id, client_id=result.client_id,
                     state_version=1, snapshot=result.model_dump_json(), policy_binding=policy.model_dump_json()))
+                self._insert_case_reference(conn, result, actor.user_id)
                 self._audit(conn, actor, 'create_case', 'executed', 'Case created.', result, new=1)
                 self._remember(conn, actor, 'create_case', key, self._digest(request), result)
             except DomainError as exc:

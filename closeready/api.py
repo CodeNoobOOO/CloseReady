@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
 from .case_requests import AuditPage, CasePage, ChangeDeadlineRequest, CreateCaseRequest
+from .case_references import CaseCommunicationReference
 from .config import AccessConfig, Principal, load_access_config
 from .models import CaseSnapshot
 from .store import DomainError, Store
@@ -125,6 +126,13 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.get('/api/v1/cases/{case_id}', response_model=CaseSnapshot)
     def get_case(case_id: str, actor: Actor):
         return store.get_case(actor, case_id)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/communication-reference',
+        response_model=CaseCommunicationReference,
+    )
+    def get_case_communication_reference(case_id: str, actor: Actor):
+        return store.case_communication_reference(actor, case_id)
 
     @app.patch('/api/v1/cases/{case_id}/deadline', response_model=CaseSnapshot)
     def change_deadline(case_id: str, body: ChangeDeadlineRequest, actor: Actor, key: Key):

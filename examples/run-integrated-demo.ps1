@@ -116,6 +116,10 @@ $case = Invoke-Mutation -Method Post -Uri "$BaseUrl/api/v1/cases" `
 $caseId = $case.case_id
 $requirementId = $case.requirements[0].requirement_id
 Write-Host "Case created: $caseId"
+$communicationReference = Invoke-RestMethod `
+    -Uri "$BaseUrl/api/v1/cases/$caseId/communication-reference" `
+    -Headers $headers
+Write-Host "Customer-visible reference: $($communicationReference.public_reference)"
 
 Write-Host 'Queuing the initial agent analysis...'
 $run = Invoke-Mutation -Method Post -Uri "$BaseUrl/api/v1/cases/$caseId/activate" `
@@ -218,6 +222,7 @@ Assert-Equal $case.readiness_status 'ready_for_confirmation' 'Case readiness'
 Write-Host 'Integrated demonstration completed successfully.' -ForegroundColor Green
 [pscustomobject]@{
     case_id = $caseId
+    public_reference = $communicationReference.public_reference
     agent_run_status = $run.status
     review_resolution = 'approved'
     sandbox_delivery_status = $delivery.delivery_status

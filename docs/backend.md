@@ -113,6 +113,7 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | POST /api/v1/cases | Create a configured checklist; 201 snapshot | Manager with client grant; valid owner and policy |
 | GET /api/v1/cases | Scoped page; items, next_cursor | Any actor with client grant |
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
+| GET /api/v1/cases/{case_id}/communication-reference | Customer-visible mail reference | Actor with client grant |
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
 | POST /api/v1/cases/{case_id}/documents | Persist a text-PDF and queue processing; 202 job | Manager with client grant |
