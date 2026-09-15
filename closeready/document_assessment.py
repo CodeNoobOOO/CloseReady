@@ -107,6 +107,34 @@ def detect_accounting_period(
     return None
 
 
+def detect_account_ref(text: str) -> str | None:
+    pattern = re.compile(
+        r"account\s*(?:number|ref)?\s*[:\-]\s*([A-Za-z0-9_-]+)",
+        re.IGNORECASE,
+    )
+
+    match = pattern.search(text)
+
+    if match is None:
+        return None
+
+    return match.group(1)
+
+
+def detect_entity_id(text: str) -> str | None:
+    pattern = re.compile(
+        r"entity\s*(?:id)?\s*[:\-]\s*([A-Za-z0-9_-]+)",
+        re.IGNORECASE,
+    )
+
+    match = pattern.search(text)
+
+    if match is None:
+        return None
+
+    return match.group(1)
+
+
 def build_evidence_refs(
     document_id: str,
     extraction: DocumentExtraction,
@@ -157,7 +185,7 @@ def assess_document(
 
     finding_id = f"finding_document_{uuid4().hex}"
 
-    # Exact duplicate is not new evidence.
+    # 1. Exact duplicate
     if duplicate:
         return DocumentFinding(
             finding_id=finding_id,
@@ -179,7 +207,7 @@ def assess_document(
             issues=["Duplicate document must not create duplicate satisfaction."],
         )
 
-    # Valid PDF but no usable extracted text.
+    # 2. Valid PDF, but no usable text could be extracted
     if not extraction.readable:
         return DocumentFinding(
             finding_id=finding_id,
@@ -203,8 +231,10 @@ def assess_document(
             issues=["Document requires manual review or OCR."],
         )
 
+    # 3. Combine extracted page text
     text = "\n".join(page.text for page in extraction.pages)
 
+    # 4. Detect document information
     detected_type = detect_document_type(text)
 
     coverage_start, coverage_end = detect_coverage(text)
@@ -214,7 +244,10 @@ def assess_document(
         coverage_end,
     )
 
-    # No requirement was associated with the upload.
+    detected_entity_id = detect_entity_id(text)
+    detected_account_ref = detect_account_ref(text)
+
+    # 5. No requirement was supplied
     if requirement_id is None:
         return DocumentFinding(
             finding_id=finding_id,
@@ -236,12 +269,13 @@ def assess_document(
             issues=["Document could not be matched to a configured requirement."],
         )
 
+    # 6. Find requirement inside the current case
     requirement = _requirement_by_id(
         case,
         requirement_id,
     )
 
-    # Never trust a requirement ID that does not belong to this case.
+    # Requirement does not belong to this case
     if requirement is None:
         return DocumentFinding(
             finding_id=finding_id,
@@ -263,7 +297,7 @@ def assess_document(
             issues=["Unknown or unauthorised requirement reference."],
         )
 
-    # Wrong document category.
+    # 7. Wrong document type
     if detected_type != requirement.document_type:
         return DocumentFinding(
             finding_id=finding_id,
@@ -290,14 +324,28 @@ def assess_document(
             ],
         )
 
-    # For the MVP we cannot safely verify entity/account identity
-    # unless an explicit trusted extraction mechanism is added.
-    entity_match = "unknown"
+    # 8. Compare entity
+    if detected_entity_id is None:
+        entity_match = "unknown"
+    elif detected_entity_id == requirement.scope.entity_id:
+        entity_match = "match"
+    else:
+        entity_match = "mismatch"
 
-    account_match = "unknown" if requirement.scope.account_ref is not None else None
+    # 9. Compare account
+    if requirement.scope.account_ref is None:
+        account_match = None
+    elif detected_account_ref is None:
+        account_match = "unknown"
+    elif detected_account_ref == requirement.scope.account_ref:
+        account_match = "match"
+    else:
+        account_match = "mismatch"
 
-    # Coverage-based requirement, especially bank statements.
+    # 10. Coverage-based requirements
     if requirement.completion_rule.kind == "coverage":
+
+        # Could not determine coverage
         if coverage_start is None or coverage_end is None:
             return DocumentFinding(
                 finding_id=finding_id,
@@ -324,6 +372,7 @@ def assess_document(
         required_start = requirement.scope.coverage_start
         required_end = requirement.scope.coverage_end
 
+        # Coverage is incomplete or wrong
         if (
             required_start is not None
             and required_end is not None
@@ -348,7 +397,8 @@ def assess_document(
                 evidence_refs=evidence_refs,
                 issues=[
                     (
-                        f"Document covers {coverage_start.isoformat()} "
+                        f"Document covers "
+                        f"{coverage_start.isoformat()} "
                         f"to {coverage_end.isoformat()}; "
                         f"{required_start.isoformat()} "
                         f"to {required_end.isoformat()} is required."
@@ -356,8 +406,29 @@ def assess_document(
                 ],
             )
 
-    # Account/entity identity is still unverified, therefore this
-    # baseline must not claim satisfies.
+    # 11. Explicit entity/account mismatch
+    if entity_match == "mismatch" or account_match == "mismatch":
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_correction",
+            detected_type=detected_type,
+            detected_period=detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            matched_item_refs=[],
+            uncertainty_reasons=[],
+            evidence_refs=evidence_refs,
+            issues=["Document entity or account does not match the requirement."],
+        )
+
+    # 12. Entity/account could not be verified
     if entity_match == "unknown" or account_match == "unknown":
         return DocumentFinding(
             finding_id=finding_id,
@@ -381,6 +452,7 @@ def assess_document(
             issues=["Identity verification is required before satisfaction."],
         )
 
+    # 13. Everything required has been verified
     return DocumentFinding(
         finding_id=finding_id,
         responsibility="document_assessment",
