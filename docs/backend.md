@@ -1,6 +1,6 @@
 # Case API: local development
 
-The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An authorised activation persists a queued run for the separate [agent worker](agent-runtime.md), which calls a configured provider and stores guarded draft/review tasks. Assigned managers can resolve these tasks; approving a draft creates a durable reviewed outbox record. Activation does not itself communicate with a client, resolve a recipient, send mail, accept documents or confirm readiness.
+The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. A manager can persist a bounded text-based PDF and its processing job before the existing worker extracts or assesses it. A current finding with verified type, coverage, entity, account and evidence can update the bound requirement through an optimistic transaction; all other results remain unresolved. An authorised activation also persists a queued LLM run for the same separately supervised worker. Assigned managers can resolve communication draft tasks; approving a draft creates a durable reviewed outbox record. Activation does not itself communicate with a client, resolve a recipient, send mail or confirm readiness.
 
 ## Setup on Windows
 
@@ -8,8 +8,8 @@ Run from the repository root. Install Python 3.11+ and then:
 
 ```powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m unittest discover -s tests -v
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest -q
 ```
 
 Create a local access configuration. The committed example is synthetic and has no usable token. The following generates a random API token in a shell variable and puts only its SHA-256 hash into an ignored local file. Run the generation once for this local configuration; keep the terminal open for the request examples. Repeating it rotates access for this user.
@@ -83,6 +83,27 @@ The resolved task records the human decision. The outbox item has `status=pendin
 
 Stop and restart the server using the same database URL: the case, version, audit history and successful idempotent responses remain. Repeating an identical mutation with its original key returns the original snapshot without another mutation. To see a stale rejection, repeat the deadline request with a new key and the old expected_state_version=1.
 
+## Upload and process a text-based PDF
+
+With the API running, start the worker in another terminal using the same access configuration and database. Set the LLM provider variables described in [agent runtime](agent-runtime.md); the worker handles both LLM runs and document jobs, one durable item per iteration.
+
+```powershell
+$env:CLOSEREADY_ACCESS_CONFIG = 'local-data/server-config.json'
+$env:CLOSEREADY_DATABASE_URL = 'sqlite:///local-data/closeready.db'
+$env:CLOSEREADY_LLM_ENABLED = '1'
+.venv/Scripts/python -m closeready.worker --poll-seconds 1
+```
+
+Then run `examples/upload-document.ps1` from the API terminal. Supply the current case and requirement IDs returned by the API; these server-owned IDs are never taken from PDF text.
+
+```powershell
+./examples/upload-document.ps1 -ApiToken $apiToken -CaseId $createdCase.case_id `
+    -RequirementId $createdCase.requirements[0].requirement_id `
+    -ExpectedStateVersion $createdCase.state_version -PdfPath 'C:/temp/july-statement.pdf'
+```
+
+The script queues the upload, polls its job and reads the finding and current Case. A `completed` job means the application accepted verified evidence. `needs_review`, `failed` and `stale` leave the requirement unresolved. This increment accepts only non-empty `application/pdf` uploads up to 5 MiB and only extracts embedded text; scanned PDFs require future OCR and manual review.
+
 ## Available routes
 
 | Route | Purpose | Access |
@@ -94,6 +115,10 @@ Stop and restart the server using the same database URL: the case, version, audi
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
+| POST /api/v1/cases/{case_id}/documents | Persist a text-PDF and queue processing; 202 job | Manager with client grant |
+| GET /api/v1/cases/{case_id}/documents/{document_id} | Document metadata without file bytes | Actor with client grant |
+| GET /api/v1/cases/{case_id}/document-jobs/{job_id} | Poll durable processing status | Actor with client grant |
+| GET /api/v1/cases/{case_id}/documents/{document_id}/finding | Read a completed assessment | Actor with client grant |
 | POST /api/v1/cases/{case_id}/activate | Persist case_activated event and queued run; 202 | Manager with client grant; configured provider |
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
@@ -108,7 +133,7 @@ Stop and restart the server using the same database URL: the case, version, audi
 | GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
 | POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders | Manager; `test_sink` |
 
-List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Keys are scoped by actor and operation (including the case for deadline updates). Replays preserve the original response, which may be older than the current case; GET the case for current state.
+List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Document upload also requires multipart fields `file`, `expected_state_version` and optional `requirement_id`. Keys are scoped by actor and operation. Replays preserve the original response, which may be older than the current case; GET the case for current state.
 
 CreateCaseRequest rejects caller-provided IDs, version, policy_version, readiness, requirement status, reviewer status and evidence. IDs are server-generated. Requirements start missing, with no evidence; readiness starts collecting. Empty checklists are rejected. Requirements may use the same document type for distinct configured accounts or items. There is currently no uniqueness restriction on client/period; an idempotency key prevents accidental request replay, not all duplicate business configuration.
 
@@ -130,4 +155,4 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis work and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs document evidence, live mail transport and an actual Lightsail deployment.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs OCR and richer document rules, document-review resolution, live mail transport and an actual Lightsail deployment.

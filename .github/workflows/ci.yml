@@ -28,10 +28,10 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements-dev.txt
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest -q
 
       - name: Compile Python sources
         run: python -m compileall -q closeready scripts

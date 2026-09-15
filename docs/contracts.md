@@ -1,6 +1,15 @@
-# CloseReady shared contracts v0.9
+# CloseReady shared contracts v1.0
 
-Status: core models, case API, a limited live analysis runtime, durable activation/worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The runtime reads checklists and records gated drafts/review tasks with durable events/runs and conservative recovery. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. Document assessment, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, durable text-PDF ingestion, deterministic document assessment, a limited live analysis runtime, durable worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The worker handles queued document jobs and queued LLM runs through separate handlers. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. OCR, document-review resolution, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+
+## v1.0 document ingestion increment
+
+- `POST /api/v1/cases/{case_id}/documents` accepts one non-empty `application/pdf` file up to 5 MiB plus `expected_state_version` and optional `requirement_id`. It returns a durable `DocumentJobRecord` with HTTP 202 only after the file and job commit.
+- Documents and jobs survive process restart. Workers use exclusive 300-second claims; an expired document claim returns to `queued` because extraction has no external side effect.
+- The current extractor supports PDFs with embedded text. Invalid PDFs fail with `INVALID_PDF`; image-only PDFs produce `needs_review`. OCR is outside this increment.
+- Student 2's deterministic assessor checks duplicate hash, configured requirement, type, coverage, entity and account. The application owns all case and requirement IDs and revalidates the finding before applying evidence.
+- Only `satisfies` with current state, a matching bound requirement, a matching file hash and non-empty evidence from that document can set a requirement to `accepted`. Other results leave the checklist unresolved. A stale upload cannot overwrite a newer case state.
+- Document bytes remain in the scoped SQLite database for the hackathon increment and are never returned by metadata endpoints. A production rollout should replace the BLOB with encrypted object storage and retention controls.
 
 ## v0.9 sandbox communication increment
 
@@ -131,9 +140,9 @@ Pausing reminders is separate from document status. A promised submission date d
 
 ## Document assessment module — Student 2
 
-Input: case snapshot, document_id, extracted text/evidence references and requirement_id (or null when unmatched).
+Input: application-loaded case snapshot, application-owned document_id, extracted text/evidence references and a bound requirement_id (or null when unmatched).
 
-Output fields: finding_id, responsibility=document_assessment, case_id, input_state_version, document_id, requirement_id, result, detected_type, detected_period, entity_match, account_match, coverage_start, coverage_end, matched_item_refs, uncertainty_reasons, evidence_refs, issues. The application attaches finding_id and the case/version envelope; the LLM supplies only the assessment content. Validate every selected document/requirement reference against authorised inputs.
+Output fields: finding_id, responsibility=document_assessment, case_id, input_state_version, document_id, requirement_id, result, detected_type, detected_period, entity_match, account_match, coverage_start, coverage_end, matched_item_refs, uncertainty_reasons, evidence_refs, issues. The implemented baseline creates this result with deterministic extraction and rules. A future LLM specialist may propose assessment content, but the application must still attach or verify the case/version envelope and validate every reference against authorised inputs.
 
 result: satisfies, needs_correction, needs_review, unmatched.
 
@@ -185,7 +194,7 @@ Execution outcomes: executed, queued, blocked, stale, failed. queued means persi
 
 ## Events, runs and reminders
 
-Events: case_activated, document_uploaded, document_extraction_completed, client_reply_received, reminder_due, reviewer_decision. Persist event_id, case_id, type, occurred_at, payload and dedupe_key. Case creation alone does not send: an authorised activation starts the first document request. Document upload starts extraction; the runtime must not reason over an unfinished extraction artifact.
+The target event taxonomy is case_activated, document_uploaded, document_extraction_completed, client_reply_received, reminder_due and reviewer_decision. The current document slice uses its durable job plus `queue_document` and `process_document` audit records as the hand-off and trace; unifying these under the agent event stream remains future work. Case creation alone does not send: an authorised activation starts the first document request. Document upload starts extraction; the runtime must not reason over an unfinished extraction artifact.
 
 Run fields: run_id, event_id, case_id, run_mode, start_state_version, status, started_at, finished_at.
 
@@ -201,7 +210,7 @@ Each audit entry records event/run IDs, actor, action, outcome, evidence or poli
 
 - Policy: policy_id, version, approved_by, approved_at, initial_request_enabled, min_reminder_interval_hours, max_reminders_per_requirement, commitment_grace_hours, sending_window_local, timezone, escalation_owner_user_id. These are firm-approved settings, not invented by the LLM. Suppress messages outside the sending window and persist the next due time. A commitment beyond the business deadline creates an internal review rather than silently extending the deadline.
 - Contact: contact_id, client_id, approved_email, active, approved_by. A sender match alone is insufficient to override case association or authorise a waiver.
-- Document: document_id, case_id, file_hash, storage_ref, original_filename, content_type, extraction_status, extracted_artifact_ref, uploaded_by, uploaded_at. Storage refs are application-managed, not arbitrary paths or URLs supplied to tools.
+- Document: document_id, case_id, bound requirement_id, input_state_version, file_hash, original_filename, media_type, size_bytes, status, duplicate_of_document_id, created_by and created_at. The hackathon baseline stores a private BLOB; public metadata records never include its bytes. Jobs separately track queued/processing/completed/needs_review/failed/stale status, attempts, lease and sanitized error code.
 - Reply: reply_id, case_id, provider_message_id, conversation_ref, sender_contact_id, received_at, body_ref, attachment_document_ids. Unknown or ambiguous associations are quarantined for review before the agent sees another client's context.
 - ReviewTask: review_task_id, case_id, run_id, requirement_ids, reason_code, reason, assigned_to, status (open/resolved), nullable draft, sent=false, created_at, resolution, resolved_by, resolved_at, resolution_reason and nullable approved_draft. Exhausted retries and escalation thresholds must create an assigned task, not only a log line.
 - Reviewed outbox: outbox_id, case_id, review_task_id, requirement_ids, guarded subject/body, status=pending_reviewed_delivery, recipient_contact_id (null until Student 3 delivery), provider_message_id (null until a sandbox or later provider attempt), created_by, created_at and delivery_status (`not_attempted`, `queued`, `sent`, `failed`, `delivery_unknown`). Student 3 updates delivery through `POST .../outbox/{outbox_id}/deliver`, not through the model.
@@ -211,7 +220,7 @@ Owner and deadline enable overdue sorting and escalation. Clients can have multi
 
 ## Frontend HTTP contract — Student 4
 
-All routes below have prefix /api/v1. Case creation/listing/retrieval, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing, sandbox delivery/mailbox, trusted reply ingest, reply assessment, findings (reply assessments only), commitments, reminders and audit retrieval are available from this table; document upload and readiness confirmation remain planned. Deadline, analysis and recovery routes are additionally available as specified above.
+All routes below have prefix /api/v1. Case creation/listing/retrieval, document upload and observation, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing, sandbox delivery/mailbox, trusted reply ingest, reply assessment, commitments, reminders and audit retrieval are available. Human readiness confirmation remains planned. Deadline, analysis and recovery routes are additionally available as specified above.
 
 | Method and route | Purpose | Response |
 | --- | --- | --- |
@@ -219,9 +228,12 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, run retri
 | POST /cases | Create a client-period case from explicit requirements | 201: case snapshot |
 | GET /cases/{case_id} | Case details | 200: case snapshot |
 | POST /cases/{case_id}/activate | Queue authorised initial-request analysis with expected_state_version | 202: queued RunRecord |
-| POST /cases/{case_id}/documents | Multipart file upload with optional requirement_id | 202: document_id, event_id, run_id |
+| POST /cases/{case_id}/documents | Multipart text-PDF upload with expected version and optional requirement_id | 202: DocumentJobRecord |
+| GET /cases/{case_id}/documents/{document_id} | Read scoped document metadata without bytes | 200: DocumentRecord |
+| GET /cases/{case_id}/document-jobs/{job_id} | Poll durable processing | 200: DocumentJobRecord |
+| GET /cases/{case_id}/documents/{document_id}/finding | Read persisted document assessment | 200: DocumentFinding |
 | GET /runs/{run_id} | Poll processing | 200: run record |
-| GET /cases/{case_id}/findings | Reply assessments in this increment; document findings remain planned | 200: items and next_cursor |
+| GET /cases/{case_id}/findings | Reply assessments | 200: items and next_cursor |
 | GET /cases/{case_id}/review-tasks | Pending and resolved review tasks | 200: items and next_cursor |
 | POST /cases/{case_id}/review-decisions | Resolve a communication-draft or operational-error review | 200: resolved review task |
 | GET /cases/{case_id}/outbox | List reviewed messages awaiting or after communication integration | 200: items and next_cursor |
@@ -238,9 +250,9 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, run retri
 
 Case creation takes client_id, accounting_period, timezone, owner_user_id, due_at, policy_id and requirement definitions. Validate owner access and persist the selected policy version. The backend supplies case IDs, versions and initial statuses. Do not accept caller-supplied readiness or reviewer approval.
 
-Document upload reserves the event/run records and returns 202 only after durable file registration. Run status remains queued until extraction succeeds or a failure is recorded. A scoped client upload session must bind the authorised client/case server-side and cannot grant review permissions. Contact/policy provisioning may use an administrator-managed seed/import in the MVP; its trusted configuration is not editable by the model.
+Document upload creates document and job records and returns 202 only after durable file registration. Job status remains queued until extraction succeeds or a failure is recorded. A scoped client upload session must bind the authorised client/case server-side and cannot grant review permissions. Contact/policy provisioning may use an administrator-managed seed/import in the MVP; its trusted configuration is not editable by the model.
 
-Implemented communication-review body: expected_state_version, review_task_id, decision, reason and nullable edited_draft. decision is approve_draft, edit_and_approve, reject_draft or dismiss_error. edited_draft is required only for edit_and_approve and its requirement IDs must match the task. Evidence acceptance, correction, waiver and follow-up pause/resume decisions remain planned and must extend the contract explicitly rather than overloading these meanings. Final confirmation body remains planned as expected_state_version and reason.
+Implemented communication-review body: expected_state_version, review_task_id, decision, reason and nullable edited_draft. decision is approve_draft, edit_and_approve, reject_draft or dismiss_error. edited_draft is required only for edit_and_approve and its requirement IDs must match the task. Strict deterministic document findings can now apply evidence automatically; human resolution of ambiguous/correction findings, waiver and follow-up pause/resume decisions remain planned and must extend the contract explicitly rather than overloading these meanings. Final confirmation body remains planned as expected_state_version and reason.
 
 Mutation requests carry an Idempotency-Key header. Same key and payload replay the recorded response; the same key with different payload is rejected. Keys are scoped to authenticated actor and operation.
 

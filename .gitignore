@@ -25,6 +25,7 @@ coverage/
 
 # Local data and generated traces
 uploads/
+output/
 local-data/
 deploy/runtime.env
 deploy/secrets/
