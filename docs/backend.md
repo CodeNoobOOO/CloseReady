@@ -79,7 +79,7 @@ $resolved | ConvertTo-Json -Depth 12
 $outboxPage | ConvertTo-Json -Depth 12
 ```
 
-The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery` and starts with `delivery_status=not_attempted` and no recipient. That is not a send. To exercise the Week 1 sandbox path, set `CLOSEREADY_MAIL_BACKEND=test_sink`, restart the API, and follow [sandbox communication](communication.md). Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
+The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery` and starts with `delivery_status=not_attempted` and no recipient. That is not a send. To send through the labeled sandbox, set `CLOSEREADY_MAIL_BACKEND=test_sink`. To send to a real mailbox, set `smtp` and the SMTP settings in [communication](communication.md). Restart the API after changing the backend. Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
 
 Stop and restart the server using the same database URL: the case, version, audit history and successful idempotent responses remain. Repeating an identical mutation with its original key returns the original snapshot without another mutation. To see a stale rejection, repeat the deadline request with a new key and the old expected_state_version=1.
 
@@ -129,15 +129,17 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
-| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Sandbox delivery of an approved outbox item | Assigned manager; `test_sink` |
-| GET /api/v1/cases/{case_id}/mailbox | Labeled sandbox messages; `live=false` | Actor with client grant; `test_sink` |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Deliver an approved outbox item | Assigned manager; `test_sink` or `smtp` |
+| GET /api/v1/cases/{case_id}/mailbox | Locally persisted delivery copies | Actor with client grant; mail enabled |
+| POST /api/v1/inbound-mail/poll | Poll IMAP/test inbox and associate replies | Manager; mail enabled |
+| GET /api/v1/inbound-mail/quarantine | Unmatched inbound mail | Manager |
 | POST /api/v1/cases/{case_id}/replies | Trusted reply ingest | Manager with client grant |
 | GET /api/v1/cases/{case_id}/replies | Associated replies | Actor with client grant |
 | POST /api/v1/cases/{case_id}/replies/{reply_id}/assess | Reply assessment + commitment/reminder effects | Manager; LLM enabled |
 | GET /api/v1/cases/{case_id}/findings | Reply assessments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/commitments | Recorded commitments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
-| POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders | Manager; `test_sink` |
+| POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due reminders | Manager; `test_sink` or `smtp` |
 
 List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Document upload also requires multipart fields `file`, `expected_state_version` and optional `requirement_id`. Keys are scoped by actor and operation. Replays preserve the original response, which may be older than the current case; GET the case for current state.
 
@@ -149,7 +151,7 @@ Errors use the shared error envelope and a generated request_id, also returned a
 
 ## Access and transaction boundary
 
-Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not editable by HTTP callers. Reminder intervals, sending windows and approved recipients live on `communication_policies` and `contacts` in the same access file; see [sandbox communication](communication.md). Without those records and `CLOSEREADY_MAIL_BACKEND=test_sink`, approval still cannot send.
+Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not editable by HTTP callers. Reminder intervals, sending windows and approved recipients live on `communication_policies` and `contacts` in the same access file; see [communication](communication.md). Without those records and a configured mail backend, approval still cannot send.
 
 Configuration is administrator-owned and loaded at startup; restart after rotating tokens or changing grants. Case records retain their original policy version. Revoking access prevents idempotent response replay for that client. HTTP callers cannot edit access grants or policy bindings. The repository assumes Principal objects came from this trusted authentication layer; it is not an untrusted tool entry point.
 
@@ -161,4 +163,4 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings, supports audited human document decisions and readiness confirmation, and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs OCR and richer document rules, live mail transport and an actual Lightsail deployment.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings, supports audited human document decisions and readiness confirmation, and can deliver a reviewed request through `test_sink` or live SMTP when configured. A complete business workflow still needs OCR and richer document rules, bounce reconciliation and an actual Lightsail deployment.

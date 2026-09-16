@@ -1,6 +1,6 @@
 # First live case-analysis loop
 
-This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). An authorised activation persists a queued run, and a separate worker reads the checklist and can generate a guarded unsent request draft or an assigned human review task. Assigned managers can resolve communication/error tasks, and approval creates a durable reviewed outbox record. Student 3 can then sandbox-deliver that record when `test_sink` and approved contacts are configured; see [sandbox communication](communication.md). The analysis loop cannot yet assess uploaded documents or confirm readiness.
+This increment connects the authenticated case API to a configured LLMProvider tool loop and SQLite action records. DeepSeek is the live-verified adapter; an additional compatible Chat Completions adapter is configurable. See [team provider configuration](llm-providers.md). An authorised activation persists a queued run, and a separate worker reads the checklist and can generate a guarded unsent request draft or an assigned human review task. Assigned managers can resolve communication/error tasks, and approval creates a durable reviewed outbox record. Student 3 can then deliver that record through `test_sink` or SMTP when approved contacts are configured; see [communication](communication.md).
 
 ## Enable it locally
 

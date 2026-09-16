@@ -108,8 +108,8 @@ class ReminderRecord(ContractModel):
 class MailboxMessage(ContractModel):
     message_id: Text
     case_id: Text
-    backend: Literal['test_sink']
-    live: Literal[False] = False
+    backend: Literal['test_sink', 'smtp']
+    live: Annotated[bool, Field(strict=True)]
     to_email: EmailAddress
     subject: Text
     body: Text
@@ -148,8 +148,8 @@ class DeliveryResult(ContractModel):
     delivery_status: Literal['sent', 'failed', 'delivery_unknown']
     recipient_contact_id: Text | None
     provider_message_id: Text | None
-    mailbox_backend: Literal['test_sink']
-    live: Literal[False] = False
+    mailbox_backend: Literal['test_sink', 'smtp']
+    live: Annotated[bool, Field(strict=True)]
 
 
 class IngestReplyResult(ContractModel):
@@ -167,3 +167,46 @@ class AssessReplyResult(ContractModel):
 
 class DispatchRemindersResult(ContractModel):
     items: list[ReminderRecord]
+
+
+InboundQuarantineReason = Literal[
+    'REFERENCE_NOT_FOUND',
+    'REFERENCE_REVOKED',
+    'SENDER_NOT_APPROVED',
+]
+
+
+class InboundQuarantineRecord(ContractModel):
+    quarantine_id: Text
+    sender_email: Text
+    received_at: Timestamp
+    reason_code: InboundQuarantineReason
+    provider_message_id: Text | None = None
+    review_task_id: Text | None = None
+
+
+class InboundQuarantinePage(ContractModel):
+    items: list[InboundQuarantineRecord]
+    next_cursor: str | None
+
+
+class InboundProcessResult(ContractModel):
+    provider_message_id: Text
+    associated: Annotated[bool, Field(strict=True)]
+    case_id: Text | None = None
+    reply: ReplyRecord | None = None
+    document_ids: list[Text] = Field(default_factory=list)
+    quarantined: InboundQuarantineRecord | None = None
+
+    @model_validator(mode='after')
+    def consistent_inbound_result(self):
+        if self.associated:
+            if self.case_id is None or self.reply is None or self.quarantined is not None:
+                raise ValueError('Associated inbound mail requires a case and reply')
+        elif self.case_id is not None or self.reply is not None or self.quarantined is None:
+            raise ValueError('Unmatched inbound mail discloses no case identifiers')
+        return self
+
+
+class InboundPollResult(ContractModel):
+    items: list[InboundProcessResult]

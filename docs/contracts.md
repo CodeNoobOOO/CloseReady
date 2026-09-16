@@ -1,6 +1,14 @@
-# CloseReady shared contracts v1.1
+# CloseReady shared contracts v1.2
 
-Status: core models, case API, durable text-PDF ingestion, deterministic document assessment, human document-review resolution, final readiness confirmation, a limited live analysis runtime, durable worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The worker handles queued document jobs and queued LLM runs through separate handlers. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. OCR, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, durable text-PDF ingestion, deterministic document assessment, human document-review resolution, final readiness confirmation, a limited live analysis runtime, durable worker execution, communication-review decisions, a reviewed-message outbox, sandbox `test_sink` follow-up, SMTP/IMAP live mail and a single-host deployment package are implemented. The worker handles queued document jobs, queued LLM runs, inbound mailbox polling and due-reminder dispatch. Student 3 can deliver an approved outbox item through `test_sink` or `smtp`, ingest a trusted or provider-associated reply, persist a reply assessment, record a commitment and schedule or cancel reminders. OCR and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+
+## v1.2 live mail transport
+
+- `CLOSEREADY_MAIL_BACKEND` accepts `disabled`, `test_sink` or `smtp`. Other names fail process start. `smtp` requires non-secret host/from/username settings plus a secret password reference; missing values fail start.
+- `POST /cases/{case_id}/outbox/{outbox_id}/deliver` and `POST /cases/{case_id}/reminders/dispatch-due` send only after contact, sending-window, outstanding-item and content-guard checks. The application attaches the Case `public_reference` to the transport copy. Stored drafts are unchanged. `DeliveryResult.live` is true only for `smtp`.
+- Outbound `Message-ID` values are stored for thread association. Inbound mail prefers `In-Reply-To` / `References`, then the customer-visible reference, then `Store.resolve_case_reference`. Sender address alone never selects a Case.
+- `POST /api/v1/inbound-mail/poll` is manager-only and idempotent. Associated PDF attachments are submitted through the existing document upload boundary. Failed association stores `REFERENCE_NOT_FOUND`, `REFERENCE_REVOKED` or `SENDER_NOT_APPROVED` without exposing internal IDs.
+- `GET /api/v1/inbound-mail/quarantine` lists unmatched inbound mail for human review. Unapproved drafts are never sent.
 
 ## v1.1 customer-visible case reference
 
@@ -250,15 +258,17 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, document 
 | GET /cases/{case_id}/review-tasks | Pending and resolved review tasks | 200: items and next_cursor |
 | POST /cases/{case_id}/review-decisions | Resolve a communication-draft or operational-error review | 200: resolved review task |
 | GET /cases/{case_id}/outbox | List reviewed messages awaiting or after communication integration | 200: items and next_cursor |
-| POST /cases/{case_id}/outbox/{outbox_id}/deliver | Sandbox-send an approved outbox item to an approved contact | 200: delivery result (`live=false`) |
-| GET /cases/{case_id}/mailbox | List labeled sandbox mailbox messages for the case | 200: items and next_cursor |
+| POST /cases/{case_id}/outbox/{outbox_id}/deliver | Send an approved outbox item to an approved contact | 200: delivery result (`live` follows backend) |
+| GET /cases/{case_id}/mailbox | List locally persisted delivery copies | 200: items and next_cursor |
+| POST /inbound-mail/poll | Poll the configured mailbox and associate replies | 200: inbound process results |
+| GET /inbound-mail/quarantine | Unmatched inbound mail for human review | 200: items and next_cursor |
 | POST /cases/{case_id}/replies | Trusted ingest of a client reply after sender/case association | 201: associated reply or quarantined review |
 | GET /cases/{case_id}/replies | Agent-visible associated replies | 200: items and next_cursor |
 | POST /cases/{case_id}/replies/{reply_id}/assess | Live/scripted reply assessment and application effects | 200: finding, optional commitment/reminder, optional review_task_id |
 | POST /cases/{case_id}/confirm-readiness | Human readiness confirmation | 200: updated case snapshot |
 | GET /cases/{case_id}/audit-events | Audit history | 200: items and next_cursor |
 | GET /cases/{case_id}/reminders | Scheduled and completed follow-up | 200: items and next_cursor |
-| POST /cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders after policy recheck | 200: dispatched reminder records |
+| POST /cases/{case_id}/reminders/dispatch-due | Dispatch due reminders after policy recheck | 200: dispatched reminder records |
 | GET /cases/{case_id}/commitments | Client commitments | 200: items and next_cursor |
 
 Case creation takes client_id, accounting_period, timezone, owner_user_id, due_at, policy_id and requirement definitions. Validate owner access and persist the selected policy version. The backend supplies case IDs, versions and initial statuses. Do not accept caller-supplied readiness or reviewer approval.

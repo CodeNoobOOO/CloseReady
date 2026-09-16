@@ -1,8 +1,16 @@
-# Sandbox communication and follow-up
+# Communication: sandbox and live mail
 
-CloseReady keeps communication decisions separate from transport. The case-analysis agent may propose a customer-facing draft, but it cannot choose a recipient, approve its own draft or send mail. An assigned manager reviews the draft first. Approval creates a durable outbox record with `delivery_status=not_attempted`.
+CloseReady keeps communication decisions separate from transport. The case-analysis agent may propose a customer-facing draft, but it cannot choose a recipient, approve its own draft or send mail. An assigned manager reviews the draft first. Approval creates a durable outbox record with `delivery_status=not_attempted`. Unapproved drafts are never sent.
 
-The current communication backend is `test_sink`. It exercises contact resolution, sending windows, idempotency, delivery state and audit records without contacting an external mail server. A successful sandbox delivery is stored in `sandbox_mailbox` and returns `live=false`; it must never be presented as evidence that a real email was sent.
+Two mail backends are supported:
+
+| `CLOSEREADY_MAIL_BACKEND` | Meaning |
+| --- | --- |
+| omitted / `disabled` | Outbox items stay unsent |
+| `test_sink` | Labeled in-process sandbox. `live=false`. Not evidence of external delivery |
+| `smtp` | Real SMTP send, optional IMAP receive. `live=true` |
+
+Unknown backend names fail process start. Missing SMTP credentials also fail start; there is no silent fixture fallback.
 
 ## Case association contract
 
@@ -14,25 +22,48 @@ Authenticated case users can read the reference through:
 GET /api/v1/cases/{case_id}/communication-reference
 ```
 
-Student 3's inbound adapter must call the Store boundary:
+The delivery adapter attaches this reference to the **sent** subject and body. The LLM never generates or edits it. Stored outbox and reminder drafts keep the reviewed wording; only the transport copy includes the token, typically as `[CR-2607-X7K9Q2AB]` in the subject and a short footer in the body. Internal identifiers such as `case_id` and `requirement_id` are rejected in customer-visible text.
+
+Inbound association:
+
+1. Prefer a stored provider `Message-ID` / `In-Reply-To` / `References` mapping from a previous outbound send.
+2. Otherwise extract the customer-visible reference from the subject or body and call:
 
 ```python
 resolution = store.resolve_case_reference(public_reference, sender_email)
 ```
 
-A successful `CaseReferenceResolution` contains `case_id`, `client_id` and `contact_id`. A failed result contains only `REFERENCE_NOT_FOUND`, `REFERENCE_REVOKED` or `SENDER_NOT_APPROVED` and discloses no internal identifiers. The resolver accepts case-insensitive references and email addresses, but reference knowledge alone never authorises access.
-
-Inbound association should first use a trusted provider thread or `In-Reply-To` mapping when available, then fall back to the customer-visible reference. Student 3 owns extraction of those mail fields; Student 1 owns the reference mapping and approved-sender validation. Unmatched results must be quarantined rather than guessed from the sender alone.
+A successful `CaseReferenceResolution` contains `case_id`, `client_id` and `contact_id`. A failed result contains only `REFERENCE_NOT_FOUND`, `REFERENCE_REVOKED` or `SENDER_NOT_APPROVED` and discloses no internal identifiers. Sender address alone never selects a Case: one client may have several active accounting periods. Unmatched mail is quarantined for human review.
 
 ## Configuration
 
-Set this only in the ignored runtime environment file:
+Set mail settings only in the ignored runtime environment file.
+
+Sandbox:
 
 ```ini
 CLOSEREADY_MAIL_BACKEND=test_sink
 ```
 
-The administrator-controlled access file must contain:
+Live personal mailbox (phase 1 send, phase 2 IMAP receive):
+
+```ini
+CLOSEREADY_MAIL_BACKEND=smtp
+CLOSEREADY_SMTP_FROM=your.firm@example.com
+CLOSEREADY_SMTP_HOST=smtp.gmail.com
+CLOSEREADY_SMTP_PORT=587
+CLOSEREADY_SMTP_SECURITY=starttls
+CLOSEREADY_SMTP_USERNAME=your.firm@example.com
+CLOSEREADY_SMTP_PASSWORD=
+CLOSEREADY_IMAP_HOST=imap.gmail.com
+CLOSEREADY_IMAP_PORT=993
+CLOSEREADY_IMAP_FOLDER=INBOX
+CLOSEREADY_MAIL_TIMEOUT_SECONDS=30
+```
+
+Use an app password or equivalent mailbox secret. Never commit it. Put the approved personal inbox on the matching `Contact.approved_email` in the administrator access file. Gmail and similar hosts require IMAP to be enabled for reply ingestion.
+
+The access file must also contain:
 
 - one active `Contact` whose `client_id` matches the case;
 - an approved email address and the human who approved it;
@@ -45,25 +76,38 @@ The administrator-controlled access file must contain:
 
 1. `POST /api/v1/cases/{case_id}/activate` queues case analysis.
 2. The worker lets the LLM read the authorised case and propose one typed action.
-3. A document request becomes an open review task and increases `state_version`. The delivery adapter can read the Case's customer-visible reference and add it deterministically to the external message.
+3. A document request becomes an open review task and increases `state_version`.
 4. `POST /api/v1/cases/{case_id}/review-decisions` lets the assigned manager approve, edit and approve, or reject the draft.
 5. Approval creates one outbox item. It still has not been sent.
-6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks the sending policy and customer-visible content, and invokes `test_sink`.
-7. `GET /api/v1/cases/{case_id}/mailbox` shows the locally persisted sandbox message.
+6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks outstanding items, the sending window and the customer-visible guard, attaches the Case reference, and invokes the configured backend.
+7. `GET /api/v1/cases/{case_id}/mailbox` lists the locally persisted delivery copy. `live=true` means SMTP was used; it is still not a bounce receipt.
 
-Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_unknown` and is not automatically retried because doing so could send a duplicate message.
+Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_status=delivery_unknown` and is not automatically retried. Other transport errors are `failed`.
 
-## Reply and reminder flow
+## Reply, attachment and reminder flow
 
-`POST /api/v1/cases/{case_id}/replies` represents a trusted mail-ingestion boundary. The caller supplies a sender address, receipt time and body. A real mail adapter would call this endpoint only after provider authentication and case association. In the sandbox, the demonstration script calls it directly.
+`POST /api/v1/cases/{case_id}/replies` remains the trusted ingest boundary used by the sandbox demo. It still requires an approved sender for that known Case.
 
-An active approved sender is associated with the case and increases `state_version`. An unknown sender is quarantined and creates a human review task; its content is not treated as authorised case evidence.
+Live inbound uses the authenticated poller instead of an unauthenticated webhook:
 
-`POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` runs the bounded reply-assessment loop. The LLM sees the reply as untrusted data and may return a typed commitment, ambiguity, dispute or waiver request. The application validates every case and requirement reference. A clear commitment records the promised time and schedules a reminder after the configured grace period. Ambiguous, disputed and waiver-related replies go to human review and never change document acceptance.
+```http
+POST /api/v1/inbound-mail/poll
+GET  /api/v1/inbound-mail/quarantine
+```
 
-`POST /api/v1/cases/{case_id}/reminders/dispatch-due` checks due reminders against the latest checklist before sandbox delivery. It cancels reminders whose requirements have already been accepted or waived, defers work outside the sending window and enforces configured limits. This endpoint is explicit in the current increment; a production scheduler remains future work.
+The poller fetches unseen IMAP messages (or the test double's inbox), associates them as above, persists an approved reply, and submits PDF attachments through the existing document store used by:
 
-## Run the integrated demonstration
+```http
+POST /api/v1/cases/{case_id}/documents
+```
+
+Non-PDF parts are ignored. Empty or oversized PDFs open a human review rather than guessing a requirement. Duplicate provider message IDs are idempotent.
+
+`POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` is unchanged: the LLM may record a commitment; the application schedules a reminder after policy checks.
+
+`POST /api/v1/cases/{case_id}/reminders/dispatch-due` rechecks outstanding items, duplicate keys, interval/limit policy and the sending window, then sends due reminders through the same backend. Outcomes are `sent`, `failed` or `delivery_unknown`. Obsolete mixed-item reminders are cancelled rather than sent. When the worker is idle and mail is configured, it also polls inbound mail and dispatches due reminders.
+
+## Run the integrated sandbox demonstration
 
 Start the API and worker with Docker Compose, then run:
 
@@ -73,16 +117,21 @@ Start the API and worker with Docker Compose, then run:
     -PdfPath .\output\pdf\closeready-valid-july-2026-bank-statement.pdf
 ```
 
-The script creates fresh IDs and follows current `state_version` values automatically. It performs two live LLM activities: the initial document-request proposal and the customer-reply assessment. It then uploads the synthetic text PDF and polls the document worker. The expected final checklist status is `accepted` and case readiness is `ready_for_confirmation`.
+That script still uses `test_sink`. It never sends external email.
 
-The demonstration stops before reminder dispatch because the synthetic client promises a future date. The reminder remains scheduled and can be inspected through the reminders endpoint. When it later becomes due, the dispatch endpoint rechecks whether its requirement is still outstanding before deciding whether to send or cancel it.
+## Prove a real mailbox round trip
 
-## Current production gaps
+1. Put your personal address on the demo contact and enable `CLOSEREADY_MAIL_BACKEND=smtp` with the SMTP/IMAP settings above.
+2. Create a case, approve the agent draft, then `POST .../outbox/{outbox_id}/deliver` with that `contact_id`.
+3. Confirm the message arrived, including the `CR-YYMM-...` reference.
+4. Reply from the same approved address, optionally attaching a text PDF, keeping the reference or using In-Reply-To.
+5. `POST /api/v1/inbound-mail/poll` and inspect the associated reply, uploaded document job and any quarantine rows.
 
-- `test_sink` is not SMTP, Gmail or AWS SES.
-- Inbound replies are posted through an API; no provider webhook or mailbox poller is connected.
-- Due reminders require an explicit dispatch call; no scheduler invokes it automatically.
-- Contact and policy administration use a trusted configuration file rather than an administrative UI.
-- OCR, attachment ingestion from replies and human resolution of ambiguous document findings remain outside this increment.
+## Remaining production gaps
 
-These limits keep the hackathon demonstration honest while preserving the same guarded interfaces needed by a future live transport adapter.
+- Personal SMTP/IMAP is not a dedicated transactional provider (SES, a firm mail gateway, bounce webhooks).
+- Due reminders can be dispatched by the worker or the explicit HTTP route; there is no separate multi-host scheduler.
+- Contact and policy administration still use a trusted configuration file rather than an administrative UI.
+- OCR and human resolution of ambiguous document findings remain Student 2/4 work.
+
+A `test_sink` mailbox row is still not evidence that mail was sent. An SMTP `delivery_status=sent` means the provider accepted the message, not that the recipient read it.
