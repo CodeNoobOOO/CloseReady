@@ -42,3 +42,6 @@ deploy/restore/
 .DS_Store
 Thumbs.db
 ~$*
+
+
+.vscode/
