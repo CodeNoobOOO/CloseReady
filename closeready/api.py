@@ -31,8 +31,9 @@ from .provider_factory import provider_from_environment
 from .health import HealthStatus
 from .communication_models import (
     AssessReplyRequest, AssessReplyResult, CommitmentPage, DeliverOutboxRequest,
-    DeliveryResult, DispatchRemindersResult, FindingPage, IngestReplyRequest,
-    IngestReplyResult, MailboxPage, ReminderPage, ReplyPage,
+    DeliveryResult, DispatchRemindersResult, FindingPage, InboundPollResult,
+    InboundQuarantinePage, IngestReplyRequest, IngestReplyResult, MailboxPage,
+    ReminderPage, ReplyPage,
 )
 from .communication_store import CommunicationStore
 from .communication_store import communication_metadata
@@ -52,6 +53,7 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     communication = CommunicationStore(store, runtime_store, mail)
     document_store = DocumentStore(
         store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
+    communication.document_store = document_store
 
     @asynccontextmanager
     async def lifespan(app):
@@ -341,6 +343,16 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.post('/api/v1/cases/{case_id}/reminders/dispatch-due', response_model=DispatchRemindersResult)
     def dispatch_reminders(case_id: str, actor: Actor, key: Key):
         return communication.dispatch_due_reminders(actor, case_id, key)
+
+    @app.post('/api/v1/inbound-mail/poll', response_model=InboundPollResult)
+    def poll_inbound_mail(actor: Actor, key: Key):
+        return communication.poll_inbound(actor, key)
+
+    @app.get('/api/v1/inbound-mail/quarantine', response_model=InboundQuarantinePage)
+    def list_inbound_quarantine(actor: Actor,
+                                cursor: Annotated[str | None, Query(max_length=128)] = None,
+                                limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_quarantine(actor, cursor, limit)
 
     return app
 
