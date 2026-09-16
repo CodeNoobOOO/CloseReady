@@ -47,6 +47,11 @@ class ChangeDeadlineRequest(ContractModel):
     reason: Annotated[Text, Field(max_length=2000)]
 
 
+class ConfirmReadinessRequest(ContractModel):
+    expected_state_version: PositiveInt
+    reason: Annotated[Text, Field(max_length=2000)]
+
+
 class CasePage(ContractModel):
     items: list[CaseSnapshot]
     next_cursor: str | None

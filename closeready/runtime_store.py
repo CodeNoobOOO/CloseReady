@@ -39,6 +39,10 @@ review_responses = Table('review_idempotent_responses', runtime_metadata,
     Column('actor_id', String, primary_key=True), Column('case_id', String, primary_key=True),
     Column('key', String, primary_key=True), Column('request_hash', String, nullable=False),
     Column('response', Text, nullable=False))
+retry_responses = Table('run_retry_idempotent_responses', runtime_metadata,
+    Column('actor_id', String, primary_key=True), Column('run_id', String, primary_key=True),
+    Column('key', String, primary_key=True), Column('request_hash', String, nullable=False),
+    Column('response', Text, nullable=False))
 traces = Table('agent_traces', runtime_metadata,
     Column('run_id', String, primary_key=True), Column('step', Integer, primary_key=True), Column('record', Text, nullable=False))
 
@@ -239,6 +243,7 @@ class RuntimeStore:
                     raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
                 conn.execute(update(reviews).where(reviews.c.review_task_id == task.review_task_id).values(
                     record=resolved.model_dump_json()))
+                self._close_run(conn, task.run_id, 'resolved')
                 self.store._audit(conn, actor, 'resolve_review_task', 'executed', resolution,
                     changed, old=current.state_version, new=changed.state_version, run_id=task.run_id)
                 if queued:
@@ -255,6 +260,122 @@ class RuntimeStore:
         if error:
             raise error
         return resolved
+
+    @staticmethod
+    def _close_run(conn, run_id, status):
+        row = conn.execute(select(runs).where(runs.c.run_id == run_id)).mappings().one()
+        data = json.loads(row['record'])
+        data['status'] = status
+        data['finished_at'] = data.get('finished_at') or now()
+        conn.execute(update(runs).where(runs.c.run_id == run_id).values(
+            status=status, claim_token=None, lease_until=None, record=json.dumps(data)))
+
+    def retry(self, actor, run_id, *, expected_state_version, key,
+              provider, model, live, reason):
+        payload = {
+            'expected_state_version': expected_state_version,
+            'provider': provider, 'model': model, 'live': live, 'reason': reason,
+        }
+        digest = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        error, current = None, None
+        with self.store.write() as conn:
+            try:
+                original_row = self._row(conn, actor, run_id)
+                current = self.store._case(conn, actor, original_row['case_id'])
+                if not actor.can_manage or original_row['actor_id'] != actor.user_id:
+                    raise forbidden()
+                replay = conn.execute(select(retry_responses).where(
+                    retry_responses.c.actor_id == actor.user_id,
+                    retry_responses.c.run_id == run_id,
+                    retry_responses.c.key == key)).mappings().one_or_none()
+                if replay:
+                    if replay['request_hash'] != digest:
+                        raise DomainError(
+                            'IDEMPOTENCY_CONFLICT',
+                            'Key was already used with different input.', 409)
+                    return RunRecord.model_validate_json(replay['response'])
+                if current.state_version != expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                task_raw = conn.execute(select(reviews.c.record).where(
+                    reviews.c.run_id == run_id,
+                    reviews.c.case_id == current.case_id)).scalar_one_or_none()
+                if task_raw is None:
+                    raise DomainError(
+                        'RUN_NOT_RETRYABLE',
+                        'Run has no operational review task to retry.', 409)
+                task = ReviewTaskRecord.model_validate_json(task_raw)
+                if task.assigned_to != actor.user_id:
+                    raise forbidden()
+                if task.status != 'open' or task.draft is not None:
+                    raise DomainError(
+                        'RUN_NOT_RETRYABLE',
+                        'Only an open operational error task can be retried.', 409)
+                active = conn.execute(select(runs.c.run_id).where(
+                    runs.c.case_id == current.case_id,
+                    runs.c.status.in_(['queued', 'running']))).first()
+                if active:
+                    raise DomainError(
+                        'RUN_ACTIVE', 'Another analysis is already active.', 409)
+
+                resolved_at = now()
+                resolved = ReviewTaskRecord.model_validate({
+                    **task.model_dump(mode='json'),
+                    'status': 'resolved', 'resolution': 'superseded',
+                    'resolved_by': actor.user_id, 'resolved_at': resolved_at,
+                    'resolution_reason': reason, 'approved_draft': None,
+                })
+                changed = CaseSnapshot.model_validate({
+                    **current.model_dump(mode='json'),
+                    'state_version': current.state_version + 1,
+                    'readiness_status': 'collecting',
+                })
+                updated = conn.execute(update(cases).where(
+                    cases.c.case_id == current.case_id,
+                    cases.c.state_version == expected_state_version).values(
+                    state_version=changed.state_version,
+                    snapshot=changed.model_dump_json()))
+                if updated.rowcount != 1:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                conn.execute(update(reviews).where(
+                    reviews.c.review_task_id == task.review_task_id).values(
+                    record=resolved.model_dump_json()))
+                self._close_run(conn, run_id, 'superseded')
+
+                new_run_id, event_id = 'run_' + uuid4().hex, 'event_' + uuid4().hex
+                record = RunRecord(
+                    run_id=new_run_id, event_id=event_id, case_id=current.case_id,
+                    start_state_version=changed.state_version, status='queued',
+                    started_at=None, finished_at=None, provider=provider,
+                    model=model, live=live)
+                conn.execute(insert(events).values(
+                    event_id=event_id, case_id=current.case_id, record=json.dumps({
+                        'type': 'analysis_retry_requested', 'occurred_at': now(),
+                        'case_id': current.case_id, 'actor_user_id': actor.user_id,
+                        'supersedes_run_id': run_id,
+                        'expected_state_version': changed.state_version})))
+                conn.execute(insert(runs).values(
+                    run_id=new_run_id, case_id=current.case_id,
+                    actor_id=actor.user_id, key='retry|' + key,
+                    expected_version=changed.state_version, status='queued',
+                    record=record.model_dump_json()))
+                conn.execute(insert(retry_responses).values(
+                    actor_id=actor.user_id, run_id=run_id, key=key,
+                    request_hash=digest, response=record.model_dump_json()))
+                self.store._audit(
+                    conn, actor, 'retry_analysis', 'queued', reason, changed,
+                    old=current.state_version, new=changed.state_version,
+                    event_id=event_id, run_id=new_run_id)
+            except DomainError as exc:
+                error = exc
+                self.store._audit(
+                    conn, actor, 'retry_analysis',
+                    'stale' if exc.code == 'STALE_STATE' else 'blocked', exc.code,
+                    current, old=current.state_version if current else None,
+                    run_id=run_id)
+        if error:
+            raise error
+        return record
 
     def start(self, actor, case_id, version, key, provider, model, live,
               event_type='case_analysis_requested', audit_action='request_case_analysis'):
@@ -292,7 +413,7 @@ class RuntimeStore:
         data.update(status=status, error_code=error)
         if status == 'running':
             data['started_at'] = now()
-        if status in ('completed', 'needs_review', 'failed', 'stale'):
+        if status in ('completed', 'needs_review', 'failed', 'stale', 'resolved', 'superseded'):
             data['finished_at'] = now()
         conn.execute(update(runs).where(runs.c.run_id == row['run_id']).values(
             status=status, record=json.dumps(data), **extra))

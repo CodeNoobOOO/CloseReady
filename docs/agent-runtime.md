@@ -64,6 +64,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/runs/$($run.ru
 
 Recovery requires the run's configured manager with case access. The worker scans expired running work before claiming another queued run; manual recovery remains available. Recovery marks interrupted work needs_review and ensures one assigned task for that run. It does not resend, rerun inference or erase committed effects. The transition is intrinsically idempotent; repeating recovery on a terminal run has no effect. Active leases return 409. A recovered worker cannot subsequently apply a proposal with its old claim.
 
+An assigned manager can close an operational error with `dismiss_error`; the review and its source run then become resolved while the original error and traces remain available. To try again instead, call `POST /api/v1/runs/{run_id}/retry` with the current `expected_state_version`, a reason and an `Idempotency-Key`. This explicitly marks the old task and run `superseded`, increments case state and queues a fresh run using the configured live provider. It never silently replays the old claim or a draft review.
+
 Review tasks expose cursor pagination (limit 1..100), reason, optional draft, resolution metadata and fixed sent=false. The assigned manager can approve, edit and approve, reject, or dismiss an operational-error task through the authenticated review-decisions endpoint. Approval creates one durable `pending_reviewed_delivery` outbox record with `delivery_status=not_attempted`; it does not resolve a recipient or send mail. New analysis with a new key is a new explicit operation and may create another review task; deduplication across distinct business events is still required before a pilot.
 
 ## Reproduce the live synthetic check

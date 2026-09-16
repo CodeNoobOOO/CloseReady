@@ -6,6 +6,10 @@ import unittest
 from fastapi.testclient import TestClient
 
 from closeready.api import create_app
+from closeready.document_assessment import assess_document
+from closeready.document_extraction import calculate_file_hash
+from closeready.document_models import DocumentExtraction, ExtractedPage
+from closeready.document_processor import DocumentProcessor
 from test_case_api import OTHER_TOKEN, TOKEN, access_config, case_request
 
 
@@ -48,6 +52,33 @@ class DocumentApiTests(unittest.TestCase):
             files={"file": ("statement.pdf", content, media_type)},
         )
 
+    def process_for_review(self, *, key='review-upload', requirement_id=None):
+        current = self.client.get(
+            f'/api/v1/cases/{self.case["case_id"]}',
+            headers={'Authorization': 'Bearer ' + TOKEN},
+        ).json()
+        response = self.upload(key=key, data={
+            'expected_state_version': str(current['state_version']),
+            'requirement_id': requirement_id if requirement_id is not None else self.requirement_id,
+        }, content=b'%PDF uncertain statement')
+        self.assertEqual(response.status_code, 202, response.text)
+        job = response.json()
+        documents = self.app.state.document_store
+        token = documents.claim(job['job_id'])
+        extraction = DocumentExtraction(
+            file_hash=calculate_file_hash(b'%PDF uncertain statement'),
+            page_count=1,
+            readable=True,
+            pages=[ExtractedPage(page=1, text=(
+                'DBS Bank Statement\nStatement Period: 01 July 2026 to 31 July 2026\n'
+                'Entity ID: entity_demo'))],
+        )
+        result = DocumentProcessor(
+            documents, extractor=lambda _content: extraction, assessor=assess_document,
+        ).execute_claimed(job['job_id'], token)
+        self.assertEqual(result.status, 'needs_review')
+        return job
+
     def test_upload_returns_202_and_scoped_metadata_endpoints(self):
         response = self.upload()
         self.assertEqual(response.status_code, 202, response.text)
@@ -81,6 +112,80 @@ class DocumentApiTests(unittest.TestCase):
             ).status_code,
             404,
         )
+
+    def test_document_list_and_manager_accept_reviewed_evidence(self):
+        job = self.process_for_review()
+        case_id = self.case['case_id']
+        listed = self.client.get(
+            f'/api/v1/cases/{case_id}/documents',
+            headers={'Authorization': 'Bearer ' + TOKEN},
+        )
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json()['items'][0]['document_id'], job['document_id'])
+        path = f'/api/v1/cases/{case_id}/documents/{job["document_id"]}/review-decisions'
+        headers = {
+            'Authorization': 'Bearer ' + TOKEN,
+            'Idempotency-Key': 'accept-reviewed-document',
+        }
+        body = {
+            'expected_state_version': self.case['state_version'],
+            'decision': 'accept_for_requirement',
+            'target_requirement_id': self.requirement_id,
+            'reason': 'Manager verified the account manually.',
+        }
+        accepted = self.client.post(path, json=body, headers=headers)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()['decision'], 'accept_for_requirement')
+        self.assertEqual(accepted.json()['document_status'], 'processed')
+        self.assertEqual(accepted.json()['resulting_state_version'], 2)
+        self.assertEqual(self.client.post(path, json=body, headers=headers).json(), accepted.json())
+        changed = self.client.get(
+            f'/api/v1/cases/{case_id}', headers=headers).json()
+        self.assertEqual(changed['requirements'][0]['status'], 'accepted')
+        self.assertEqual(changed['readiness_status'], 'ready_for_confirmation')
+
+    def test_manager_can_reassign_or_reject_a_reviewed_document(self):
+        job = self.process_for_review()
+        case_id = self.case['case_id']
+        path = f'/api/v1/cases/{case_id}/documents/{job["document_id"]}/review-decisions'
+        reassigned = self.client.post(path, json={
+            'expected_state_version': 1,
+            'decision': 'reassign_for_processing',
+            'target_requirement_id': self.requirement_id,
+            'reason': 'Retry against the selected checklist item.',
+        }, headers={
+            'Authorization': 'Bearer ' + TOKEN,
+            'Idempotency-Key': 'reassign-reviewed-document',
+        })
+        self.assertEqual(reassigned.status_code, 200, reassigned.text)
+        self.assertEqual(reassigned.json()['document_status'], 'queued')
+        decisions = self.client.get(
+            path, headers={'Authorization': 'Bearer ' + TOKEN}).json()['items']
+        self.assertEqual(decisions[0]['source_finding']['result'], 'needs_review')
+        queued_job = self.client.get(
+            f'/api/v1/cases/{case_id}/document-jobs/{job["job_id"]}',
+            headers={'Authorization': 'Bearer ' + TOKEN},
+        ).json()
+        self.assertEqual(queued_job['status'], 'queued')
+
+        second = self.process_for_review(key='reject-upload')
+        current = self.client.get(
+            f'/api/v1/cases/{case_id}', headers={'Authorization': 'Bearer ' + TOKEN}).json()
+        rejected = self.client.post(
+            f'/api/v1/cases/{case_id}/documents/{second["document_id"]}/review-decisions',
+            json={
+                'expected_state_version': current['state_version'],
+                'decision': 'reject_document',
+                'target_requirement_id': None,
+                'reason': 'The document belongs to another account.',
+            },
+            headers={
+                'Authorization': 'Bearer ' + TOKEN,
+                'Idempotency-Key': 'reject-reviewed-document',
+            },
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()['document_status'], 'rejected')
 
     def test_upload_requires_authentication_and_current_case_state(self):
         path = f"/api/v1/cases/{self.case['case_id']}/documents"

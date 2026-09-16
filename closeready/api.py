@@ -11,14 +11,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
-from .case_requests import AuditPage, CasePage, ChangeDeadlineRequest, CreateCaseRequest
+from .case_requests import (
+    AuditPage, CasePage, ChangeDeadlineRequest, ConfirmReadinessRequest,
+    CreateCaseRequest,
+)
 from .case_references import CaseCommunicationReference
 from .config import AccessConfig, Principal, load_access_config
 from .models import CaseSnapshot
 from .store import DomainError, Store
 from .runtime import AgentRuntime
 from .runtime_models import (
-    AnalyseRequest, OutboxPage, ReviewDecisionRequest, ReviewTaskPage,
+    AnalyseRequest, OutboxPage, RetryRunRequest, ReviewDecisionRequest, ReviewTaskPage,
     ReviewTaskRecord, RunRecord,
 )
 from .runtime_store import RuntimeStore
@@ -33,7 +36,11 @@ from .communication_models import (
 )
 from .communication_store import CommunicationStore
 from .communication_store import communication_metadata
-from .document_models import DocumentFinding, DocumentJobRecord, DocumentRecord
+from .document_models import (
+    DocumentFinding, DocumentJobRecord, DocumentPage, DocumentRecord,
+    DocumentReviewDecisionPage, DocumentReviewDecisionRecord,
+    DocumentReviewDecisionRequest,
+)
 from .document_store import MAX_DOCUMENT_BYTES, DocumentStore, document_metadata
 from .runtime_store import runtime_metadata
 
@@ -43,7 +50,8 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     store = Store(database_url, access)
     runtime_store = RuntimeStore(store)
     communication = CommunicationStore(store, runtime_store, mail)
-    document_store = DocumentStore(store)
+    document_store = DocumentStore(
+        store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -138,6 +146,10 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def change_deadline(case_id: str, body: ChangeDeadlineRequest, actor: Actor, key: Key):
         return store.change_deadline(actor, case_id, body, key)
 
+    @app.post('/api/v1/cases/{case_id}/confirm-readiness', response_model=CaseSnapshot)
+    def confirm_readiness(case_id: str, body: ConfirmReadinessRequest, actor: Actor, key: Key):
+        return store.confirm_readiness(actor, case_id, body, key)
+
     @app.get('/api/v1/cases/{case_id}/audit-events', response_model=AuditPage)
     def get_audit(case_id: str, actor: Actor, cursor: Annotated[int, Query(ge=0)] = 0,
                   limit: Annotated[int, Query(ge=1, le=100)] = 50):
@@ -172,11 +184,40 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
         )
 
     @app.get(
+        '/api/v1/cases/{case_id}/documents',
+        response_model=DocumentPage,
+    )
+    def list_documents(case_id: str, actor: Actor,
+                       cursor: Annotated[str | None, Query(max_length=128)] = None,
+                       limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return document_store.list_documents(actor, case_id, cursor, limit)
+
+    @app.get(
         '/api/v1/cases/{case_id}/documents/{document_id}',
         response_model=DocumentRecord,
     )
     def get_document(case_id: str, document_id: str, actor: Actor):
         return document_store.get_document(actor, case_id, document_id)
+
+    @app.post(
+        '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',
+        response_model=DocumentReviewDecisionRecord,
+    )
+    def decide_document_review(
+            case_id: str, document_id: str,
+            body: DocumentReviewDecisionRequest, actor: Actor, key: Key):
+        return document_store.decide_review(actor, case_id, document_id, body, key)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',
+        response_model=DocumentReviewDecisionPage,
+    )
+    def list_document_review_decisions(
+            case_id: str, document_id: str, actor: Actor,
+            cursor: Annotated[str | None, Query(max_length=128)] = None,
+            limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return document_store.list_review_decisions(
+            actor, case_id, document_id, cursor, limit)
 
     @app.get(
         '/api/v1/cases/{case_id}/document-jobs/{job_id}',
@@ -225,6 +266,17 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def recover_run(run_id: str, actor: Actor, key: Key):
         # Terminal transition is intrinsically idempotent; no inference is retried.
         return runtime_store.recover(actor, run_id)
+
+    @app.post('/api/v1/runs/{run_id}/retry', response_model=RunRecord, status_code=202)
+    def retry_run(run_id: str, body: RetryRunRequest, actor: Actor, key: Key):
+        if provider is None:
+            raise DomainError('LLM_UNAVAILABLE', 'Live LLM configuration is not enabled.', 503)
+        if not provider.live:
+            raise DomainError('LIVE_LLM_REQUIRED', 'Run retry requires a live LLM provider.', 503)
+        return runtime_store.retry(
+            actor, run_id, expected_state_version=body.expected_state_version,
+            key=key, provider=provider.provider_name, model=provider.model,
+            live=provider.live, reason=body.reason)
 
     @app.get('/api/v1/cases/{case_id}/review-tasks', response_model=ReviewTaskPage)
     def review_tasks(case_id: str, actor: Actor,

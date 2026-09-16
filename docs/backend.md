@@ -117,10 +117,15 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
 | POST /api/v1/cases/{case_id}/documents | Persist a text-PDF and queue processing; 202 job | Manager with client grant |
+| GET /api/v1/cases/{case_id}/documents | List scoped document metadata | Actor with client grant |
 | GET /api/v1/cases/{case_id}/documents/{document_id} | Document metadata without file bytes | Actor with client grant |
 | GET /api/v1/cases/{case_id}/document-jobs/{job_id} | Poll durable processing status | Actor with client grant |
 | GET /api/v1/cases/{case_id}/documents/{document_id}/finding | Read a completed assessment | Actor with client grant |
+| POST /api/v1/cases/{case_id}/documents/{document_id}/review-decisions | Accept, reject or reassign a review finding | Manager with client grant; current state version |
+| GET /api/v1/cases/{case_id}/documents/{document_id}/review-decisions | List durable decisions with source findings | Actor with client grant |
+| POST /api/v1/cases/{case_id}/confirm-readiness | Confirm a computed complete case as ready | Manager with client grant; current state version |
 | POST /api/v1/cases/{case_id}/activate | Persist case_activated event and queued run; 202 | Manager with client grant; configured provider |
+| POST /api/v1/runs/{run_id}/retry | Supersede an open operational failure and queue a fresh run | Assigned manager; current state; live provider |
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
@@ -156,4 +161,4 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs OCR and richer document rules, document-review resolution, live mail transport and an actual Lightsail deployment.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings, supports audited human document decisions and readiness confirmation, and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs OCR and richer document rules, live mail transport and an actual Lightsail deployment.

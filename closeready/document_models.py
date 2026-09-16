@@ -27,6 +27,7 @@ DocumentStatus = Literal[
     "needs_review",
     "failed",
     "stale",
+    "rejected",
 ]
 
 DocumentJobStatus = Literal[
@@ -36,6 +37,13 @@ DocumentJobStatus = Literal[
     "needs_review",
     "failed",
     "stale",
+    "rejected",
+]
+
+DocumentReviewDecision = Literal[
+    "accept_for_requirement",
+    "reject_document",
+    "reassign_for_processing",
 ]
 
 
@@ -74,6 +82,46 @@ class DocumentJobRecord(ContractModel):
     finished_at: Timestamp | None = None
     lease_expires_at: Timestamp | None = None
     error_code: Text | None = None
+
+
+class DocumentPage(ContractModel):
+    items: list[DocumentRecord]
+    next_cursor: Text | None
+
+
+class DocumentReviewDecisionRequest(ContractModel):
+    expected_state_version: PositiveInt
+    decision: DocumentReviewDecision
+    target_requirement_id: Text | None = None
+    reason: Annotated[Text, Field(max_length=2000)]
+
+    @model_validator(mode="after")
+    def decision_has_required_target(self):
+        if self.decision == "reject_document" and self.target_requirement_id is not None:
+            raise ValueError("Rejected documents cannot target a requirement")
+        if self.decision != "reject_document" and self.target_requirement_id is None:
+            raise ValueError("This decision requires a target requirement")
+        return self
+
+
+class DocumentReviewDecisionRecord(ContractModel):
+    decision_id: Text
+    case_id: Text
+    document_id: Text
+    job_id: Text
+    decision: DocumentReviewDecision
+    target_requirement_id: Text | None
+    reviewer_user_id: Text
+    reason: Text
+    decided_at: Timestamp
+    resulting_state_version: PositiveInt
+    document_status: DocumentStatus
+    source_finding: "DocumentFinding"
+
+
+class DocumentReviewDecisionPage(ContractModel):
+    items: list[DocumentReviewDecisionRecord]
+    next_cursor: Text | None
 
 MatchResult = Literal[
     "match",

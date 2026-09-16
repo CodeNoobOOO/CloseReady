@@ -1,6 +1,6 @@
 # CloseReady shared contracts v1.1
 
-Status: core models, case API, durable text-PDF ingestion, deterministic document assessment, a limited live analysis runtime, durable worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The worker handles queued document jobs and queued LLM runs through separate handlers. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. OCR, document-review resolution, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
+Status: core models, case API, durable text-PDF ingestion, deterministic document assessment, human document-review resolution, final readiness confirmation, a limited live analysis runtime, durable worker execution, communication-review decisions, a reviewed-message outbox, a labeled sandbox follow-up path and a single-host deployment package are implemented. The worker handles queued document jobs and queued LLM runs through separate handlers. Student 3 can deliver an approved outbox item through `test_sink`, ingest a trusted reply, persist a reply assessment, record a commitment and schedule or cancel reminders. OCR, live mail transport and actual Lightsail provisioning remain planned. Fixtures in `examples/` are synthetic and are not model evaluation results. See [backend setup](backend.md), [sandbox communication](communication.md), [deployment runbook](../deploy/README.md) and [runtime details](agent-runtime.md).
 
 ## v1.1 customer-visible case reference
 
@@ -228,7 +228,7 @@ Owner and deadline enable overdue sorting and escalation. Clients can have multi
 
 ## Frontend HTTP contract — Student 4
 
-All routes below have prefix /api/v1. Case creation/listing/retrieval, document upload and observation, run retrieval, review-task retrieval, communication-review decisions, reviewed-outbox listing, sandbox delivery/mailbox, trusted reply ingest, reply assessment, commitments, reminders and audit retrieval are available. Human readiness confirmation remains planned. Deadline, analysis and recovery routes are additionally available as specified above.
+All routes below have prefix /api/v1. Case creation/listing/retrieval, document upload, document review, readiness confirmation, run retrieval, communication review, reviewed-outbox listing, sandbox delivery/mailbox, trusted reply ingest, reply assessment, commitments, reminders and audit retrieval are available. Deadline, analysis and recovery routes are additionally available as specified above.
 
 | Method and route | Purpose | Response |
 | --- | --- | --- |
@@ -238,10 +238,14 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, document 
 | GET /cases/{case_id}/communication-reference | Read the durable customer-visible mail reference | 200: CaseCommunicationReference |
 | POST /cases/{case_id}/activate | Queue authorised initial-request analysis with expected_state_version | 202: queued RunRecord |
 | POST /cases/{case_id}/documents | Multipart text-PDF upload with expected version and optional requirement_id | 202: DocumentJobRecord |
+| GET /cases/{case_id}/documents | List scoped document metadata; optional cursor | 200: items and next_cursor |
 | GET /cases/{case_id}/documents/{document_id} | Read scoped document metadata without bytes | 200: DocumentRecord |
 | GET /cases/{case_id}/document-jobs/{job_id} | Poll durable processing | 200: DocumentJobRecord |
 | GET /cases/{case_id}/documents/{document_id}/finding | Read persisted document assessment | 200: DocumentFinding |
+| POST /cases/{case_id}/documents/{document_id}/review-decisions | Accept, reject or reassign a document waiting for review | 200: DocumentReviewDecisionRecord |
+| GET /cases/{case_id}/documents/{document_id}/review-decisions | Read durable human decisions and their source findings | 200: items and next_cursor |
 | GET /runs/{run_id} | Poll processing | 200: run record |
+| POST /runs/{run_id}/retry | Supersede an open operational-error review and queue a new live run | 202: queued RunRecord |
 | GET /cases/{case_id}/findings | Reply assessments | 200: items and next_cursor |
 | GET /cases/{case_id}/review-tasks | Pending and resolved review tasks | 200: items and next_cursor |
 | POST /cases/{case_id}/review-decisions | Resolve a communication-draft or operational-error review | 200: resolved review task |
@@ -261,7 +265,11 @@ Case creation takes client_id, accounting_period, timezone, owner_user_id, due_a
 
 Document upload creates document and job records and returns 202 only after durable file registration. Job status remains queued until extraction succeeds or a failure is recorded. A scoped client upload session must bind the authorised client/case server-side and cannot grant review permissions. Contact/policy provisioning may use an administrator-managed seed/import in the MVP; its trusted configuration is not editable by the model.
 
-Implemented communication-review body: expected_state_version, review_task_id, decision, reason and nullable edited_draft. decision is approve_draft, edit_and_approve, reject_draft or dismiss_error. edited_draft is required only for edit_and_approve and its requirement IDs must match the task. Strict deterministic document findings can now apply evidence automatically; human resolution of ambiguous/correction findings, waiver and follow-up pause/resume decisions remain planned and must extend the contract explicitly rather than overloading these meanings. Final confirmation body remains planned as expected_state_version and reason.
+Implemented communication-review body: expected_state_version, review_task_id, decision, reason and nullable edited_draft. decision is approve_draft, edit_and_approve, reject_draft or dismiss_error. edited_draft is required only for edit_and_approve and its requirement IDs must match the task.
+
+Document-review body contains expected_state_version, decision, target_requirement_id and reason. decision is accept_for_requirement, reject_document or reassign_for_processing. Accept and reassign require a target requirement; reject forbids one. Accept requires persisted readable evidence, records the reviewer, updates readiness and cancels related scheduled reminders in the same transaction. Reassign binds the selected requirement and returns the existing durable job to queued state. Each decision retains the source finding so reprocessing cannot erase the evidence behind the earlier human action. Final confirmation body contains expected_state_version and reason; only a manager can transition a structurally complete `ready_for_confirmation` case to `ready`.
+
+Resolving a communication or operational review also moves its source run to `resolved`, while retaining its original error and traces. `POST /runs/{run_id}/retry` accepts expected_state_version and reason for an open operational-error task, resolves that task as `superseded`, marks the prior run `superseded`, increments case state and queues one new run using the currently configured live provider. Draft reviews cannot use this retry route.
 
 Mutation requests carry an Idempotency-Key header. Same key and payload replay the recorded response; the same key with different payload is rejected. Keys are scoped to authenticated actor and operation.
 
