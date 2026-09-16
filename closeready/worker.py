@@ -5,6 +5,7 @@ import os
 import time
 
 from .config import load_access_config
+from .communication_store import CommunicationStore
 from .document_processor import DocumentProcessor
 from .document_store import DocumentStore
 from .provider_factory import provider_from_environment
@@ -67,9 +68,12 @@ def worker_from_environment():
         raise RuntimeError('Set CLOSEREADY_LLM_ENABLED=1 for the agent worker.')
     access = load_access_config(path)
     store = Store(database_url, access)
-    document_store = DocumentStore(store)
+    runtime_store = RuntimeStore(store)
+    communication = CommunicationStore(store, runtime_store, None)
+    document_store = DocumentStore(
+        store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
     return AgentWorker(
-        RuntimeStore(store),
+        runtime_store,
         provider_from_environment(),
         access,
         document_store=document_store,

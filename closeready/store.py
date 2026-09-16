@@ -12,7 +12,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import make_url
 
-from .case_requests import AuditPage, CasePage, ChangeDeadlineRequest, CreateCaseRequest
+from .case_requests import (
+    AuditPage, CasePage, ChangeDeadlineRequest, ConfirmReadinessRequest,
+    CreateCaseRequest,
+)
 from .case_references import CaseCommunicationReference, CaseReferenceResolution
 from .config import AccessConfig, Principal
 from .models import CaseSnapshot
@@ -279,6 +282,81 @@ class Store:
                 error = exc
                 self._audit(conn, actor, 'change_deadline', 'stale' if exc.code == 'STALE_STATE' else 'blocked',
                     exc.code, current, old=current.state_version if current else None)
+        if error:
+            raise error
+        return result
+
+    def confirm_readiness(
+            self, actor: Principal, case_id: str,
+            request: ConfirmReadinessRequest, key: str) -> CaseSnapshot:
+        error, current = None, None
+        operation = 'confirm_readiness:' + case_id
+        digest = self._digest(request)
+        with self.write() as conn:
+            try:
+                current = self._case(conn, actor, case_id)
+                if not actor.can_manage:
+                    raise forbidden()
+                replay = self._replay(conn, actor, operation, key, digest)
+                if replay:
+                    return replay
+                if current.state_version != request.expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                if current.readiness_status != 'ready_for_confirmation':
+                    raise DomainError(
+                        'CASE_NOT_CONFIRMABLE',
+                        'Case must pass all configured requirements before confirmation.',
+                        409,
+                    )
+                if not current.requirements or any(
+                        item.status not in ('accepted', 'waived')
+                        or item.reviewer_status == 'pending'
+                        for item in current.requirements):
+                    raise DomainError(
+                        'CASE_NOT_CONFIRMABLE',
+                        'Case contains an unresolved requirement or review.',
+                        409,
+                    )
+                # Import locally to avoid coupling schema initialisation while still
+                # enforcing every persisted human-review blocker at this gate.
+                from .runtime_store import reviews
+                open_review = any(
+                    json.loads(raw).get('status') == 'open'
+                    for raw in conn.execute(select(reviews.c.record).where(
+                        reviews.c.case_id == case_id)).scalars()
+                )
+                if open_review:
+                    raise DomainError(
+                        'CASE_NOT_CONFIRMABLE',
+                        'Case has an unresolved human review task.',
+                        409,
+                    )
+                result = CaseSnapshot.model_validate({
+                    **current.model_dump(mode='json'),
+                    'state_version': current.state_version + 1,
+                    'readiness_status': 'ready',
+                })
+                changed = conn.execute(update(cases).where(
+                    cases.c.case_id == case_id,
+                    cases.c.state_version == request.expected_state_version,
+                ).values(
+                    snapshot=result.model_dump_json(),
+                    state_version=result.state_version,
+                ))
+                if changed.rowcount != 1:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                self._audit(
+                    conn, actor, 'confirm_readiness', 'executed', request.reason,
+                    result, old=current.state_version, new=result.state_version,
+                )
+                self._remember(conn, actor, operation, key, digest, result)
+            except DomainError as exc:
+                error = exc
+                self._audit(
+                    conn, actor, 'confirm_readiness',
+                    'stale' if exc.code == 'STALE_STATE' else 'blocked', exc.code,
+                    current, old=current.state_version if current else None,
+                )
         if error:
             raise error
         return result

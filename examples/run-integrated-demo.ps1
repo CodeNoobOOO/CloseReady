@@ -218,6 +218,18 @@ $audit = Invoke-RestMethod -Uri "$BaseUrl/api/v1/cases/$caseId/audit-events" -He
 Assert-Equal $finding.result 'satisfies' 'Document finding'
 Assert-Equal $case.requirements[0].status 'accepted' 'Requirement status'
 Assert-Equal $case.readiness_status 'ready_for_confirmation' 'Case readiness'
+Assert-Equal $reminders.items[0].status 'cancelled' 'Resolved-item reminder status'
+
+Write-Host 'Confirming bookkeeping readiness as the assigned manager...'
+$case = Invoke-Mutation -Method Post `
+    -Uri "$BaseUrl/api/v1/cases/$caseId/confirm-readiness" `
+    -Body @{
+        expected_state_version = $case.state_version
+        reason = 'Synthetic demo evidence reviewed and checklist confirmed.'
+    } `
+    -Key (New-IdempotencyKey 'demo-confirm-readiness')
+Assert-Equal $case.readiness_status 'ready' 'Confirmed case readiness'
+$audit = Invoke-RestMethod -Uri "$BaseUrl/api/v1/cases/$caseId/audit-events" -Headers $headers
 
 Write-Host 'Integrated demonstration completed successfully.' -ForegroundColor Green
 [pscustomobject]@{

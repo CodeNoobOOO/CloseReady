@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Table,
     Text as SQLText,
+    delete,
     insert,
     select,
     update,
@@ -26,7 +27,11 @@ from .document_models import (
     DocumentFinding,
     DocumentExtraction,
     DocumentJobRecord,
+    DocumentPage,
     DocumentRecord,
+    DocumentReviewDecisionPage,
+    DocumentReviewDecisionRecord,
+    DocumentReviewDecisionRequest,
     DocumentUploadRequest,
 )
 from .models import CaseSnapshot
@@ -79,6 +84,23 @@ document_upload_responses = Table(
     Column("request_hash", String, nullable=False),
     Column("response", SQLText, nullable=False),
 )
+document_review_decisions = Table(
+    "document_review_decisions",
+    document_metadata,
+    Column("decision_id", String, primary_key=True),
+    Column("case_id", String, nullable=False, index=True),
+    Column("document_id", String, nullable=False, index=True),
+    Column("record", SQLText, nullable=False),
+)
+document_review_responses = Table(
+    "document_review_responses",
+    document_metadata,
+    Column("actor_id", String, primary_key=True),
+    Column("case_id", String, primary_key=True),
+    Column("key", String, primary_key=True),
+    Column("request_hash", String, nullable=False),
+    Column("response", SQLText, nullable=False),
+)
 
 
 @dataclass(frozen=True)
@@ -89,8 +111,9 @@ class DocumentProcessingContext:
 
 
 class DocumentStore:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, on_requirements_resolved=None):
         self.store = store
+        self.on_requirements_resolved = on_requirements_resolved
         document_metadata.create_all(store.engine)
 
     @staticmethod
@@ -295,6 +318,230 @@ class DocumentStore:
         if raw is None:
             raise DomainError("NOT_FOUND", "Document not found.", 404)
         return DocumentRecord.model_validate_json(raw)
+
+    def list_documents(
+            self, actor: Principal, case_id: str, cursor: str | None,
+            limit: int) -> DocumentPage:
+        with self.store.engine.connect() as conn:
+            self.store._case(conn, actor, case_id)
+            query = select(documents.c.record).where(documents.c.case_id == case_id)
+            if cursor is not None:
+                query = query.where(documents.c.document_id > cursor)
+            rows = conn.execute(
+                query.order_by(documents.c.document_id).limit(limit + 1)
+            ).scalars().all()
+        items = [DocumentRecord.model_validate_json(row) for row in rows[:limit]]
+        return DocumentPage(
+            items=items,
+            next_cursor=items[-1].document_id if len(rows) > limit else None,
+        )
+
+    @staticmethod
+    def _review_digest(document_id: str, request: DocumentReviewDecisionRequest):
+        payload = {"document_id": document_id, **request.model_dump(mode="json")}
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def decide_review(
+            self, actor: Principal, case_id: str, document_id: str,
+            request: DocumentReviewDecisionRequest, key: str
+            ) -> DocumentReviewDecisionRecord:
+        error, current = None, None
+        digest = self._review_digest(document_id, request)
+        with self.store.write() as conn:
+            try:
+                current = self.store._case(conn, actor, case_id)
+                if not actor.can_manage:
+                    raise forbidden()
+                replay = conn.execute(select(document_review_responses).where(
+                    document_review_responses.c.actor_id == actor.user_id,
+                    document_review_responses.c.case_id == case_id,
+                    document_review_responses.c.key == key,
+                )).mappings().one_or_none()
+                if replay is not None:
+                    if replay["request_hash"] != digest:
+                        raise DomainError(
+                            "IDEMPOTENCY_CONFLICT",
+                            "Key was already used with different input.", 409)
+                    return DocumentReviewDecisionRecord.model_validate_json(
+                        replay["response"])
+                if current.state_version != request.expected_state_version:
+                    raise DomainError("STALE_STATE", "Reload case before retrying.", 409)
+                row = conn.execute(select(documents).where(
+                    documents.c.case_id == case_id,
+                    documents.c.document_id == document_id,
+                )).mappings().one_or_none()
+                if row is None:
+                    raise DomainError("NOT_FOUND", "Document not found.", 404)
+                document = DocumentRecord.model_validate_json(row["record"])
+                job_row = conn.execute(select(document_jobs).where(
+                    document_jobs.c.document_id == document_id,
+                    document_jobs.c.case_id == case_id,
+                )).mappings().one()
+                job = DocumentJobRecord.model_validate_json(job_row["record"])
+                if document.status != "needs_review" or job.status != "needs_review":
+                    raise DomainError(
+                        "DOCUMENT_NOT_REVIEWABLE",
+                        "Only a document waiting for review can be decided.", 409)
+                finding_raw = conn.execute(select(document_findings.c.record).where(
+                    document_findings.c.document_id == document_id,
+                    document_findings.c.case_id == case_id,
+                )).scalar_one_or_none()
+                if finding_raw is None:
+                    raise DomainError(
+                        "DOCUMENT_NOT_REVIEWABLE", "Document finding is missing.", 409)
+                finding = DocumentFinding.model_validate_json(finding_raw)
+                target = None
+                if request.target_requirement_id is not None:
+                    target = next((item for item in current.requirements
+                        if item.requirement_id == request.target_requirement_id), None)
+                    if target is None:
+                        raise DomainError(
+                            "INVALID_REQUIREMENT",
+                            "Requirement does not belong to this case.", 422)
+                    if target.status in ("accepted", "waived"):
+                        raise DomainError(
+                            "REQUIREMENT_RESOLVED",
+                            "Requirement is already resolved.", 409)
+
+                next_version = current.state_version + 1
+                requirements = [item.model_dump(mode="json")
+                                for item in current.requirements]
+                if request.decision == "accept_for_requirement":
+                    if not finding.evidence_refs:
+                        raise DomainError(
+                            "INSUFFICIENT_EVIDENCE",
+                            "A document without readable evidence cannot be accepted.", 422)
+                    requirements = [{
+                        **item.model_dump(mode="json"),
+                        "status": "accepted",
+                        "reviewer_status": "approved",
+                        "evidence_refs": [ref.model_dump(mode="json")
+                                          for ref in finding.evidence_refs],
+                    } if item.requirement_id == target.requirement_id
+                        else item.model_dump(mode="json")
+                        for item in current.requirements]
+                    next_document = DocumentRecord.model_validate({
+                        **document.model_dump(mode="json"),
+                        "requirement_id": target.requirement_id,
+                        "status": "processed",
+                    })
+                    next_job = DocumentJobRecord.model_validate({
+                        **job.model_dump(mode="json"),
+                        "status": "completed", "error_code": None,
+                    })
+                elif request.decision == "reject_document":
+                    next_document = DocumentRecord.model_validate({
+                        **document.model_dump(mode="json"), "status": "rejected",
+                    })
+                    next_job = DocumentJobRecord.model_validate({
+                        **job.model_dump(mode="json"), "status": "rejected",
+                        "error_code": "REJECTED_BY_REVIEWER",
+                    })
+                else:
+                    next_document = DocumentRecord.model_validate({
+                        **document.model_dump(mode="json"),
+                        "requirement_id": target.requirement_id,
+                        "input_state_version": next_version,
+                        "status": "queued",
+                    })
+                    next_job = DocumentJobRecord.model_validate({
+                        **job.model_dump(mode="json"),
+                        "status": "queued", "started_at": None,
+                        "finished_at": None, "lease_expires_at": None,
+                        "error_code": None,
+                    })
+                    conn.execute(delete(document_findings).where(
+                        document_findings.c.document_id == document_id))
+                    conn.execute(delete(document_extractions).where(
+                        document_extractions.c.document_id == document_id))
+
+                all_resolved = all(item["status"] in ("accepted", "waived")
+                                   for item in requirements)
+                changed = CaseSnapshot.model_validate({
+                    **current.model_dump(mode="json"),
+                    "state_version": next_version,
+                    "readiness_status": (
+                        "ready_for_confirmation" if all_resolved else "collecting"),
+                    "requirements": requirements,
+                })
+                updated = conn.execute(update(cases).where(
+                    cases.c.case_id == case_id,
+                    cases.c.state_version == request.expected_state_version,
+                ).values(
+                    state_version=changed.state_version,
+                    snapshot=changed.model_dump_json(),
+                ))
+                if updated.rowcount != 1:
+                    raise DomainError("STALE_STATE", "Reload case before retrying.", 409)
+                conn.execute(update(documents).where(
+                    documents.c.document_id == document_id).values(
+                    requirement_id=next_document.requirement_id,
+                    record=next_document.model_dump_json(),
+                ))
+                self._replace_job(
+                    conn, next_job, claim_token=None, lease_until=None)
+                if request.decision == "accept_for_requirement" \
+                        and self.on_requirements_resolved is not None:
+                    self.on_requirements_resolved(
+                        conn, actor, changed, [target.requirement_id])
+                result = DocumentReviewDecisionRecord(
+                    decision_id="document_decision_" + uuid4().hex,
+                    case_id=case_id, document_id=document_id, job_id=job.job_id,
+                    decision=request.decision,
+                    target_requirement_id=request.target_requirement_id,
+                    reviewer_user_id=actor.user_id, reason=request.reason,
+                    decided_at=datetime.now(timezone.utc),
+                    resulting_state_version=changed.state_version,
+                    document_status=next_document.status,
+                    source_finding=finding,
+                )
+                conn.execute(insert(document_review_decisions).values(
+                    decision_id=result.decision_id, case_id=case_id,
+                    document_id=document_id, record=result.model_dump_json()))
+                conn.execute(insert(document_review_responses).values(
+                    actor_id=actor.user_id, case_id=case_id, key=key,
+                    request_hash=digest, response=result.model_dump_json()))
+                self.store._audit(
+                    conn, actor, "decide_document_review", "executed",
+                    request.reason, changed, old=current.state_version,
+                    new=changed.state_version)
+            except DomainError as exc:
+                error = exc
+                self.store._audit(
+                    conn, actor, "decide_document_review",
+                    "stale" if exc.code == "STALE_STATE" else "blocked",
+                    exc.code, current,
+                    old=current.state_version if current else None)
+        if error:
+            raise error
+        return result
+
+    def list_review_decisions(
+            self, actor: Principal, case_id: str, document_id: str,
+            cursor: str | None, limit: int) -> DocumentReviewDecisionPage:
+        with self.store.engine.connect() as conn:
+            self.store._case(conn, actor, case_id)
+            document_exists = conn.execute(select(documents.c.document_id).where(
+                documents.c.case_id == case_id,
+                documents.c.document_id == document_id,
+            )).scalar_one_or_none()
+            if document_exists is None:
+                raise DomainError("NOT_FOUND", "Document not found.", 404)
+            query = select(document_review_decisions.c.record).where(
+                document_review_decisions.c.case_id == case_id,
+                document_review_decisions.c.document_id == document_id,
+            )
+            if cursor is not None:
+                query = query.where(document_review_decisions.c.decision_id > cursor)
+            rows = conn.execute(query.order_by(
+                document_review_decisions.c.decision_id).limit(limit + 1)).scalars().all()
+        items = [DocumentReviewDecisionRecord.model_validate_json(row)
+                 for row in rows[:limit]]
+        return DocumentReviewDecisionPage(
+            items=items,
+            next_cursor=items[-1].decision_id if len(rows) > limit else None,
+        )
 
     def get_job(
         self, actor: Principal, case_id: str, job_id: str
@@ -705,6 +952,13 @@ class DocumentStore:
                     old=case.state_version,
                     new=changed.state_version,
                 )
+                if self.on_requirements_resolved is not None:
+                    self.on_requirements_resolved(
+                        conn,
+                        self._system_actor(changed),
+                        changed,
+                        [requirement.requirement_id],
+                    )
                 status, error_code = "completed", None
             else:
                 status, error_code = "needs_review", None
