@@ -14,6 +14,11 @@ from closeready.case_requests import CreateCaseRequest
 from closeready.communication_models import DeliverOutboxRequest, IngestReplyRequest
 from closeready.communication_store import CommunicationStore, reminders
 from closeready.config import AccessConfig
+from closeready.document_assessment import assess_document
+from closeready.document_extraction import calculate_file_hash
+from closeready.document_models import DocumentExtraction, ExtractedPage
+from closeready.document_processor import DocumentProcessor
+from closeready.document_store import DocumentStore
 from closeready.mail import SandboxMailSink, TimeoutMailSink
 from closeready.models import CaseSnapshot, ReplyAssessmentContent
 from closeready.runtime import AgentRuntime
@@ -198,6 +203,45 @@ class CommunicationStoreTests(unittest.TestCase):
         self.assertEqual(statuses[second_result.reminder.reminder_id], 'scheduled')
         commitments = self.db.list_commitments(self.actor, self.case.case_id).items
         self.assertEqual({c.status for c in commitments}, {'active', 'superseded'})
+
+    def test_verified_document_acceptance_immediately_cancels_related_reminder(self):
+        associated = self.ingest()
+        version = self.store.get_case(self.actor, self.case.case_id).state_version
+        applied = self.db.apply_reply_assessment(
+            self.actor, self.case.case_id, associated.reply.reply_id,
+            assessment(self.requirement_id()), version, 'assess-before-document')
+        self.assertEqual(applied.reminder.status, 'scheduled')
+
+        documents = DocumentStore(
+            self.store, on_requirements_resolved=self.db.cancel_scheduled_for_resolved)
+        content = b'synthetic bank statement'
+        case = self.store.get_case(self.actor, self.case.case_id)
+        job = documents.upload(
+            self.actor, self.case.case_id,
+            requirement_id=self.requirement_id(),
+            expected_state_version=case.state_version,
+            filename='statement.pdf', media_type='application/pdf',
+            content=content, key='document-after-reminder')
+        token = documents.claim(job.job_id)
+        extraction = DocumentExtraction(
+            file_hash=calculate_file_hash(content), page_count=1, readable=True,
+            pages=[ExtractedPage(page=1, text=(
+                'DBS Bank Statement\nStatement Period: 01 July 2026 to 31 July 2026\n'
+                'Entity ID: entity_demo\nAccount Ref: account_demo'))],
+        )
+        DocumentProcessor(
+            documents, extractor=lambda _content: extraction,
+            assessor=assess_document,
+        ).execute_claimed(job.job_id, token)
+
+        reminder = next(item for item in
+            self.db.list_reminders(self.actor, self.case.case_id).items
+            if item.reminder_id == applied.reminder.reminder_id)
+        self.assertEqual(reminder.status, 'cancelled')
+        audit = self.store.audit_events(self.actor, self.case.case_id, 0, 100).items
+        self.assertTrue(any(
+            event.action == 'cancel_reminder' and event.reason == 'requirement_resolved'
+            for event in audit))
 
     def test_ambiguous_and_dispute_replies_do_not_record_commitments(self):
         unclear = self.ingest(body='I will send it soon.', key='soon')

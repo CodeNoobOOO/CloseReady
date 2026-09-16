@@ -432,6 +432,12 @@ class CommunicationStore:
                         record=cancelled.model_dump_json()))
                 self.store._audit(conn, actor, 'cancel_reminder', 'executed', reason, case)
 
+    def cancel_scheduled_for_resolved(
+            self, conn, actor, case, requirement_ids):
+        """Cancel related unsent reminders inside the caller's case transaction."""
+        self._cancel_scheduled(
+            conn, actor, case, requirement_ids, 'requirement_resolved')
+
     def _schedule_follow_up(self, conn, actor, case, requirement_ids, commitment, policy):
         contact = self._resolve_contact(case)
         sent_count = 0

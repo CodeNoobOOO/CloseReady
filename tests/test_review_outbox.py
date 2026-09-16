@@ -132,6 +132,27 @@ class ReviewOutboxStoreTests(unittest.TestCase):
             self.request(task, 'dismiss_error'), 'dismiss-1')
         self.assertEqual(resolved.resolution, 'dismissed')
         self.assertEqual(self.db.outbox_records(self.actor, self.case.case_id).items, [])
+        self.assertEqual(self.db.get_run(self.actor, task.run_id).status, 'resolved')
+
+    def test_retry_supersedes_error_task_and_queues_a_new_run(self):
+        task = self.create_error_task()
+        retried = self.db.retry(
+            self.actor, task.run_id, expected_state_version=2,
+            key='retry-error-1', provider='deepseek', model='deepseek-flash',
+            live=True, reason='Provider access was restored.')
+
+        self.assertEqual(retried.status, 'queued')
+        self.assertEqual(retried.start_state_version, 3)
+        self.assertEqual(self.db.get_run(self.actor, task.run_id).status, 'superseded')
+        review = self.db.review_tasks(self.actor, self.case.case_id).items[0]
+        self.assertEqual(review.status, 'resolved')
+        self.assertEqual(review.resolution, 'superseded')
+        self.assertEqual(self.store.get_case(self.actor, self.case.case_id).state_version, 3)
+        replay = self.db.retry(
+            self.actor, task.run_id, expected_state_version=2,
+            key='retry-error-1', provider='deepseek', model='deepseek-flash',
+            live=True, reason='Provider access was restored.')
+        self.assertEqual(replay.run_id, retried.run_id)
 
     def test_decision_type_and_edited_requirement_mismatches_do_not_mutate(self):
         task = self.create_draft_task()
