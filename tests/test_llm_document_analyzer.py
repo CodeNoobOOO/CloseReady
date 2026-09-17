@@ -2,19 +2,20 @@ from datetime import date
 
 import pytest
 from pydantic import ValidationError
+
 from closeready.llm import Completion, ProviderError, ToolCall
-
-
 from closeready.llm_document_analyzer import (
     CandidateRequirement,
+    DocumentAnalysisError,
     DocumentAnalysisRequest,
     DocumentAnalyzer,
+    LiveLLMDocumentAnalyzer,
     LLMDocumentAnalysis,
     LLMDocumentEvidence,
     ScriptedDocumentAnalyzer,
-    DocumentAnalysisError,
-    LiveLLMDocumentAnalyzer,
 )
+
+
 class FakeProvider:
     provider_name = "fake"
     model = "fake-model"
@@ -48,7 +49,7 @@ def make_request() -> DocumentAnalysisRequest:
                 document_type="bank_statement",
                 accounting_period="2026-07",
                 entity_name="Northstar Pte Ltd",
-                account_identifier="****1234",
+                masked_account_identifier="****1234",
                 coverage_start=date(2026, 7, 1),
                 coverage_end=date(2026, 7, 31),
             )
@@ -60,10 +61,12 @@ def test_valid_bank_statement_analysis():
     analysis = LLMDocumentAnalysis(
         detected_type="bank_statement",
         entity_name="Northstar Pte Ltd",
+        bank_name="DBS Bank",
         account_identifier="****1234",
         detected_period="2026-07",
         coverage_start=date(2026, 7, 1),
         coverage_end=date(2026, 7, 31),
+        currency="SGD",
         matched_item_refs=[],
         uncertainty_reasons=[],
         evidence=[
@@ -77,10 +80,12 @@ def test_valid_bank_statement_analysis():
 
     assert analysis.detected_type == "bank_statement"
     assert analysis.entity_name == "Northstar Pte Ltd"
+    assert analysis.bank_name == "DBS Bank"
     assert analysis.account_identifier == "****1234"
     assert analysis.detected_period == "2026-07"
     assert analysis.coverage_start == date(2026, 7, 1)
     assert analysis.coverage_end == date(2026, 7, 31)
+    assert analysis.currency == "SGD"
 
     assert len(analysis.evidence) == 1
     assert analysis.evidence[0].page == 1
@@ -148,9 +153,23 @@ def test_analysis_request_contains_authorised_requirements():
 
     assert requirement.requirement_id == "req_july_bank"
     assert requirement.document_type == "bank_statement"
-    assert requirement.account_identifier == "****1234"
+    assert requirement.masked_account_identifier == "****1234"
     assert requirement.coverage_start == date(2026, 7, 1)
     assert requirement.coverage_end == date(2026, 7, 31)
+
+
+def test_candidate_requirement_does_not_expose_internal_account_ref():
+    requirement = CandidateRequirement(
+        requirement_id="req_july_bank",
+        document_type="bank_statement",
+        accounting_period="2026-07",
+        masked_account_identifier="****1234",
+    )
+
+    data = requirement.model_dump()
+
+    assert data["masked_account_identifier"] == "****1234"
+    assert "account_ref" not in data
 
 
 def test_analysis_request_requires_at_least_one_page():
@@ -190,7 +209,6 @@ def test_scripted_analyzer_returns_configured_analysis():
     analyzer = ScriptedDocumentAnalyzer(expected)
 
     request = make_request()
-
     result = analyzer.analyze(request)
 
     assert result == expected
@@ -215,10 +233,12 @@ def valid_completion():
       "analysis": {
         "detected_type": "bank_statement",
         "entity_name": "Northstar Pte Ltd",
+        "bank_name": "DBS Bank",
         "account_identifier": "****1234",
         "detected_period": "2026-07",
         "coverage_start": "2026-07-01",
         "coverage_end": "2026-07-31",
+        "currency": "SGD",
         "matched_item_refs": [],
         "uncertainty_reasons": [],
         "evidence": [
@@ -252,7 +272,11 @@ def valid_completion():
 
 
 def test_live_analyzer_accepts_valid_structured_tool_call():
-    provider = FakeProvider([valid_completion()])
+    provider = FakeProvider(
+        [
+            valid_completion(),
+        ]
+    )
 
     analyzer = LiveLLMDocumentAnalyzer(provider)
 
@@ -260,10 +284,12 @@ def test_live_analyzer_accepts_valid_structured_tool_call():
 
     assert result.detected_type == "bank_statement"
     assert result.entity_name == "Northstar Pte Ltd"
+    assert result.bank_name == "DBS Bank"
     assert result.account_identifier == "****1234"
     assert result.detected_period == "2026-07"
     assert result.coverage_start == date(2026, 7, 1)
     assert result.coverage_end == date(2026, 7, 31)
+    assert result.currency == "SGD"
 
     assert len(provider.requests) == 1
 
@@ -329,8 +355,6 @@ def test_live_analyzer_repairs_invalid_model_output():
 
     assert result.detected_type == "bank_statement"
     assert result.detected_period == "2026-07"
-
-    # First invalid response + one repair attempt.
     assert len(provider.requests) == 2
 
 

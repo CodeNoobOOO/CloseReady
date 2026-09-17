@@ -11,7 +11,11 @@ from closeready.document_models import (
     ExtractedPage,
 )
 from closeready.models import CaseSnapshot
-
+from closeready.document_assessment import assess_llm_analysis
+from closeready.llm_document_analyzer import (
+    LLMDocumentAnalysis,
+    LLMDocumentEvidence,
+)
 
 def make_case() -> CaseSnapshot:
     return CaseSnapshot.model_validate(
@@ -279,3 +283,178 @@ def test_prompt_injection_cannot_override_wrong_period():
     assert finding.detected_period == "2026-06"
     assert finding.coverage_start == date(2026, 6, 1)
     assert finding.coverage_end == date(2026, 6, 30)
+
+
+def make_llm_case():
+    case = make_case()
+
+    requirement = case.requirements[0]
+
+    updated_scope = requirement.scope.model_copy(
+        update={
+            "masked_account_identifier": "****1234",
+        }
+    )
+
+    updated_requirement = requirement.model_copy(
+        update={
+            "scope": updated_scope,
+        }
+    )
+
+    return case.model_copy(
+        update={
+            "requirements": [
+                updated_requirement,
+                *case.requirements[1:],
+            ]
+        }
+    )
+
+
+def make_valid_llm_bank_analysis():
+    return LLMDocumentAnalysis(
+        detected_type="bank_statement",
+        entity_name="entity_demo",
+        bank_name="DBS Bank",
+        account_identifier="Account ending in 1234",
+        detected_period="2026-07",
+        coverage_start=date(2026, 7, 1),
+        coverage_end=date(2026, 7, 31),
+        currency="SGD",
+        uncertainty_reasons=[],
+        evidence=[
+            LLMDocumentEvidence(
+                field="entity_name",
+                page=1,
+                excerpt="Entity ID: entity_demo",
+            ),
+            LLMDocumentEvidence(
+                field="account_identifier",
+                page=1,
+                excerpt="Account ending in 1234",
+            ),
+            LLMDocumentEvidence(
+                field="coverage_start",
+                page=1,
+                excerpt=("Statement Period: " "01 July 2026 to 31 July 2026"),
+            ),
+        ],
+    )
+
+
+def test_llm_analysis_satisfies_fully_verified_bank_statement():
+    case = make_llm_case()
+    analysis = make_valid_llm_bank_analysis()
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_valid",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "satisfies"
+    assert finding.detected_type == "bank_statement"
+    assert finding.entity_match == "match"
+    assert finding.account_match == "match"
+    assert finding.coverage_start == date(2026, 7, 1)
+    assert finding.coverage_end == date(2026, 7, 31)
+    assert finding.uncertainty_reasons == []
+    assert finding.issues == []
+    assert len(finding.evidence_refs) == 3
+
+
+def test_llm_analysis_account_mismatch_needs_review():
+    case = make_llm_case()
+
+    analysis = make_valid_llm_bank_analysis().model_copy(
+        update={
+            "account_identifier": "Account ending in 9999",
+        }
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_wrong_account",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "needs_review"
+    assert finding.entity_match == "match"
+    assert finding.account_match == "mismatch"
+    assert finding.uncertainty_reasons
+    assert finding.issues
+
+
+def test_llm_analysis_missing_account_needs_review():
+    case = make_llm_case()
+
+    analysis = make_valid_llm_bank_analysis().model_copy(
+        update={
+            "account_identifier": None,
+        }
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_missing_account",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "needs_review"
+    assert finding.entity_match == "match"
+    assert finding.account_match == "unknown"
+    assert finding.uncertainty_reasons
+    assert finding.issues
+
+
+def test_llm_analysis_insufficient_coverage_needs_correction():
+    case = make_llm_case()
+
+    analysis = make_valid_llm_bank_analysis().model_copy(
+        update={
+            "coverage_start": date(2026, 7, 10),
+            "coverage_end": date(2026, 7, 31),
+        }
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_short_coverage",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "needs_correction"
+    assert finding.entity_match == "match"
+    assert finding.account_match == "match"
+    assert finding.coverage_start == date(2026, 7, 10)
+    assert finding.coverage_end == date(2026, 7, 31)
+    assert finding.issues
+
+
+def test_llm_analysis_without_evidence_needs_review():
+    case = make_llm_case()
+
+    analysis = make_valid_llm_bank_analysis().model_copy(
+        update={
+            "evidence": [],
+        }
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_no_evidence",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "needs_review"
+    assert finding.entity_match == "match"
+    assert finding.account_match == "match"
+    assert finding.evidence_refs == []
+    assert finding.uncertainty_reasons
+    assert finding.issues
