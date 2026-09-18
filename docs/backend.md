@@ -1,6 +1,6 @@
 # Case API: local development
 
-The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. An authorised activation persists a queued run for the separate [agent worker](agent-runtime.md), which calls a configured provider and stores guarded draft/review tasks. Assigned managers can resolve these tasks; approving a draft creates a durable reviewed outbox record. Activation does not itself communicate with a client, resolve a recipient, send mail, accept documents or confirm readiness.
+The backend provides an authenticated FastAPI application with file-backed SQLite storage through SQLAlchemy. A manager can persist a bounded text-based PDF and its processing job before the existing worker extracts or assesses it. A current finding with verified type, coverage, entity, account and evidence can update the bound requirement through an optimistic transaction; all other results remain unresolved. An authorised activation also persists a queued LLM run for the same separately supervised worker. Assigned managers can resolve communication draft tasks; approving a draft creates a durable reviewed outbox record. Activation does not itself communicate with a client, resolve a recipient, send mail or confirm readiness.
 
 ## Setup on Windows
 
@@ -8,8 +8,8 @@ Run from the repository root. Install Python 3.11+ and then:
 
 ```powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m unittest discover -s tests -v
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest -q
 ```
 
 Create a local access configuration. The committed example is synthetic and has no usable token. The following generates a random API token in a shell variable and puts only its SHA-256 hash into an ignored local file. Run the generation once for this local configuration; keep the terminal open for the request examples. Repeating it rotates access for this user.
@@ -79,9 +79,30 @@ $resolved | ConvertTo-Json -Depth 12
 $outboxPage | ConvertTo-Json -Depth 12
 ```
 
-The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery` and starts with `delivery_status=not_attempted` and no recipient. That is not a send. To exercise the Week 1 sandbox path, set `CLOSEREADY_MAIL_BACKEND=test_sink`, restart the API, and follow [sandbox communication](communication.md). Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
+The resolved task records the human decision. The outbox item has `status=pending_reviewed_delivery` and starts with `delivery_status=not_attempted` and no recipient. That is not a send. To send through the labeled sandbox, set `CLOSEREADY_MAIL_BACKEND=test_sink`. To send to a real mailbox, set `smtp` and the SMTP settings in [communication](communication.md). Restart the API after changing the backend. Use `edit_and_approve` with `edited_draft`, `reject_draft` for a task containing a draft, or `dismiss_error` for an operational task without a draft. Decisions are terminal and require the exact current case version.
 
 Stop and restart the server using the same database URL: the case, version, audit history and successful idempotent responses remain. Repeating an identical mutation with its original key returns the original snapshot without another mutation. To see a stale rejection, repeat the deadline request with a new key and the old expected_state_version=1.
+
+## Upload and process a text-based PDF
+
+With the API running, start the worker in another terminal using the same access configuration and database. Set the LLM provider variables described in [agent runtime](agent-runtime.md); the worker handles both LLM runs and document jobs, one durable item per iteration.
+
+```powershell
+$env:CLOSEREADY_ACCESS_CONFIG = 'local-data/server-config.json'
+$env:CLOSEREADY_DATABASE_URL = 'sqlite:///local-data/closeready.db'
+$env:CLOSEREADY_LLM_ENABLED = '1'
+.venv/Scripts/python -m closeready.worker --poll-seconds 1
+```
+
+Then run `examples/upload-document.ps1` from the API terminal. Supply the current case and requirement IDs returned by the API; these server-owned IDs are never taken from PDF text.
+
+```powershell
+./examples/upload-document.ps1 -ApiToken $apiToken -CaseId $createdCase.case_id `
+    -RequirementId $createdCase.requirements[0].requirement_id `
+    -ExpectedStateVersion $createdCase.state_version -PdfPath 'C:/temp/july-statement.pdf'
+```
+
+The script queues the upload, polls its job and reads the finding and current Case. A `completed` job means the application accepted verified evidence. `needs_review`, `failed` and `stale` leave the requirement unresolved. This increment accepts only non-empty `application/pdf` uploads up to 5 MiB and only extracts embedded text; scanned PDFs require future OCR and manual review.
 
 ## Available routes
 
@@ -92,23 +113,35 @@ Stop and restart the server using the same database URL: the case, version, audi
 | POST /api/v1/cases | Create a configured checklist; 201 snapshot | Manager with client grant; valid owner and policy |
 | GET /api/v1/cases | Scoped page; items, next_cursor | Any actor with client grant |
 | GET /api/v1/cases/{case_id} | Current snapshot | Actor with client grant |
+| GET /api/v1/cases/{case_id}/communication-reference | Customer-visible mail reference | Actor with client grant |
 | PATCH /api/v1/cases/{case_id}/deadline | Audited deadline change; 200 snapshot | Manager with client grant |
 | GET /api/v1/cases/{case_id}/audit-events | Scoped audit page | Actor with client grant |
+| POST /api/v1/cases/{case_id}/documents | Persist a text-PDF and queue processing; 202 job | Manager with client grant |
+| GET /api/v1/cases/{case_id}/documents | List scoped document metadata | Actor with client grant |
+| GET /api/v1/cases/{case_id}/documents/{document_id} | Document metadata without file bytes | Actor with client grant |
+| GET /api/v1/cases/{case_id}/document-jobs/{job_id} | Poll durable processing status | Actor with client grant |
+| GET /api/v1/cases/{case_id}/documents/{document_id}/finding | Read a completed assessment | Actor with client grant |
+| POST /api/v1/cases/{case_id}/documents/{document_id}/review-decisions | Accept, reject or reassign a review finding | Manager with client grant; current state version |
+| GET /api/v1/cases/{case_id}/documents/{document_id}/review-decisions | List durable decisions with source findings | Actor with client grant |
+| POST /api/v1/cases/{case_id}/confirm-readiness | Confirm a computed complete case as ready | Manager with client grant; current state version |
 | POST /api/v1/cases/{case_id}/activate | Persist case_activated event and queued run; 202 | Manager with client grant; configured provider |
+| POST /api/v1/runs/{run_id}/retry | Supersede an open operational failure and queue a fresh run | Assigned manager; current state; live provider |
 | GET /api/v1/cases/{case_id}/review-tasks | Open and resolved review tasks | Actor with client grant |
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
-| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Sandbox delivery of an approved outbox item | Assigned manager; `test_sink` |
-| GET /api/v1/cases/{case_id}/mailbox | Labeled sandbox messages; `live=false` | Actor with client grant; `test_sink` |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Deliver an approved outbox item | Assigned manager; `test_sink` or `smtp` |
+| GET /api/v1/cases/{case_id}/mailbox | Locally persisted delivery copies | Actor with client grant; mail enabled |
+| POST /api/v1/inbound-mail/poll | Poll IMAP/test inbox and associate replies | Manager; mail enabled |
+| GET /api/v1/inbound-mail/quarantine | Unmatched inbound mail | Manager |
 | POST /api/v1/cases/{case_id}/replies | Trusted reply ingest | Manager with client grant |
 | GET /api/v1/cases/{case_id}/replies | Associated replies | Actor with client grant |
 | POST /api/v1/cases/{case_id}/replies/{reply_id}/assess | Reply assessment + commitment/reminder effects | Manager; LLM enabled |
 | GET /api/v1/cases/{case_id}/findings | Reply assessments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/commitments | Recorded commitments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
-| POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due sandbox reminders | Manager; `test_sink` |
+| POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due reminders | Manager; `test_sink` or `smtp` |
 
-List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Keys are scoped by actor and operation (including the case for deadline updates). Replays preserve the original response, which may be older than the current case; GET the case for current state.
+List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Document upload also requires multipart fields `file`, `expected_state_version` and optional `requirement_id`. Keys are scoped by actor and operation. Replays preserve the original response, which may be older than the current case; GET the case for current state.
 
 CreateCaseRequest rejects caller-provided IDs, version, policy_version, readiness, requirement status, reviewer status and evidence. IDs are server-generated. Requirements start missing, with no evidence; readiness starts collecting. Empty checklists are rejected. Requirements may use the same document type for distinct configured accounts or items. There is currently no uniqueness restriction on client/period; an idempotency key prevents accidental request replay, not all duplicate business configuration.
 
@@ -118,7 +151,7 @@ Errors use the shared error envelope and a generated request_id, also returned a
 
 ## Access and transaction boundary
 
-Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not editable by HTTP callers. Reminder intervals, sending windows and approved recipients live on `communication_policies` and `contacts` in the same access file; see [sandbox communication](communication.md). Without those records and `CLOSEREADY_MAIL_BACKEND=test_sink`, approval still cannot send.
+Configure one random high-entropy token per principal, stored only as its SHA-256 hash in the server access file. SHA-256 here is for random bearer tokens, not human passwords. can_manage=false grants read access within configured client_ids. Owners must be configured managers with a grant to that client. Each policy binding explicitly allows client IDs, records an approved version identity and is captured in the database when a case is created. These bindings are not editable by HTTP callers. Reminder intervals, sending windows and approved recipients live on `communication_policies` and `contacts` in the same access file; see [communication](communication.md). Without those records and a configured mail backend, approval still cannot send.
 
 Configuration is administrator-owned and loaded at startup; restart after rotating tokens or changing grants. Case records retain their original policy version. Revoking access prevents idempotent response replay for that client. HTTP callers cannot edit access grants or policy bindings. The repository assumes Principal objects came from this trusted authentication layer; it is not an untrusted tool entry point.
 
@@ -130,4 +163,8 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis work and can sandbox-deliver a reviewed request when `test_sink` is enabled. A complete business workflow still needs document evidence, live mail transport and an actual Lightsail deployment.
+The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings, supports audited human document decisions and readiness confirmation, and can deliver a reviewed request through `test_sink` or live SMTP when configured. A complete business workflow still needs OCR and richer document rules, bounce reconciliation and an actual Lightsail deployment.
+
+## Undo final readiness confirmation
+
+`POST /api/v1/cases/{case_id}/reopen` requires manager bearer authentication and an `Idempotency-Key`. Body: `{"expected_state_version": 3, "reason": "Confirmation needs further review."}`. The reason must be nonblank and at most 2000 characters. Only `ready` transitions to `ready_for_confirmation`; the state version increments once, and accepted/waived requirements and their evidence are preserved. The server records `reopen_case`, actor, reason and old/new versions in the audit trail; it does not remove the original confirmation, resend messages or recreate reminders. Reconfirmation uses the existing readiness gate. Non-ready cases return `CASE_NOT_READY` (409); stale versions return `STALE_STATE` (409). Same-key replays return the original response; different input under that key returns `IDEMPOTENCY_CONFLICT`. No database migration is required.

@@ -5,20 +5,28 @@ import os
 import time
 
 from .config import load_access_config
+from .communication_store import CommunicationStore
+from .document_processor import DocumentProcessor
+from .document_store import DocumentStore
+from .mail import mail_backend
 from .provider_factory import provider_from_environment
 from .runtime import AgentRuntime
 from .runtime_store import RuntimeStore
-from .store import Store
+from .store import DomainError, Store
 
 
 logger = logging.getLogger(__name__)
 
 
 class AgentWorker:
-    def __init__(self, runtime_store, provider, access):
+    def __init__(self, runtime_store, provider, access,
+                 document_store=None, document_processor=None, communication=None):
         self.runtime_store = runtime_store
         self.provider = provider
         self.access = access
+        self.document_store = document_store
+        self.document_processor = document_processor
+        self.communication = communication
 
     def _actor(self, actor_id, client_id):
         return next((principal for principal in self.access.principals
@@ -28,6 +36,9 @@ class AgentWorker:
     def run_once(self):
         for run_id, _actor_id in self.runtime_store.expired_run_candidates():
             self.runtime_store.recover_expired_system(run_id)
+        if self.document_store is not None:
+            for job_id in self.document_store.expired_job_candidates():
+                self.document_store.recover_expired_system(job_id)
 
         for run_id, actor_id, client_id in self.runtime_store.queued_candidates():
             actor = self._actor(actor_id, client_id)
@@ -39,6 +50,25 @@ class AgentWorker:
                 continue
             return AgentRuntime(self.runtime_store, self.provider).execute_claimed(
                 actor, run_id, token)
+
+        if self.document_store is not None and self.document_processor is not None:
+            for job_id in self.document_store.queued_candidates():
+                token = self.document_store.claim(job_id)
+                if token is None:
+                    continue
+                return self.document_processor.execute_claimed(job_id, token)
+        if self.communication is not None and self.communication.mail is not None:
+            try:
+                inbound = self.communication.poll_inbound()
+                reminders = self.communication.dispatch_due_all()
+            except DomainError as exc:
+                logger.error('MAIL_WORKER_BLOCKED: %s', exc.code)
+                return None
+            except Exception:
+                logger.error('MAIL_WORKER_FAILED')
+                return None
+            if inbound.items or reminders.items:
+                return inbound if inbound.items else reminders
         return None
 
 
@@ -52,7 +82,20 @@ def worker_from_environment():
         raise RuntimeError('Set CLOSEREADY_LLM_ENABLED=1 for the agent worker.')
     access = load_access_config(path)
     store = Store(database_url, access)
-    return AgentWorker(RuntimeStore(store), provider_from_environment(), access)
+    runtime_store = RuntimeStore(store)
+    mail = mail_backend(os.environ.get('CLOSEREADY_MAIL_BACKEND'))
+    communication = CommunicationStore(store, runtime_store, mail)
+    document_store = DocumentStore(
+        store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
+    communication.document_store = document_store
+    return AgentWorker(
+        runtime_store,
+        provider_from_environment(),
+        access,
+        document_store=document_store,
+        document_processor=DocumentProcessor(document_store),
+        communication=communication,
+    )
 
 
 def polling_seconds(value):

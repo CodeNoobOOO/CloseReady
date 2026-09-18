@@ -13,6 +13,10 @@ from sqlalchemy import text
 from closeready.api import create_app, from_env
 from closeready.config import AccessConfig
 from closeready.case_requests import CreateCaseRequest
+from closeready.models import CaseSnapshot
+from closeready.store import cases
+from closeready.runtime_store import reviews
+from sqlalchemy import insert, update
 
 TOKEN = 'synthetic-test-token-never-use-in-deployment'
 OTHER_TOKEN = 'other-synthetic-test-token-never-use'
@@ -65,6 +69,30 @@ class CaseApiTests(unittest.TestCase):
             json={'expected_state_version': version, 'due_at': '2026-09-20T09:00:00+08:00', 'reason': 'Client approved extension'},
             headers=dict(self.headers, **{'Idempotency-Key': key}))
 
+    def mark_ready_for_confirmation(self, case):
+        requirement = dict(case['requirements'][0])
+        requirement.update(
+            status='accepted',
+            reviewer_status='approved',
+            evidence_refs=[{
+                'document_id': 'document_test',
+                'page': 1,
+                'excerpt': 'Synthetic verified evidence.',
+            }],
+        )
+        ready = CaseSnapshot.model_validate({
+            **case,
+            'state_version': case['state_version'] + 1,
+            'readiness_status': 'ready_for_confirmation',
+            'requirements': [requirement],
+        })
+        with self.app.state.store.engine.begin() as conn:
+            conn.execute(update(cases).where(cases.c.case_id == case['case_id']).values(
+                state_version=ready.state_version,
+                snapshot=ready.model_dump_json(),
+            ))
+        return ready.model_dump(mode='json')
+
     def test_create_read_and_server_owned_initial_state(self):
         case = self.create()
         self.assertEqual(case['state_version'], 1)
@@ -75,6 +103,118 @@ class CaseApiTests(unittest.TestCase):
         self.assertEqual(case['policy_version'], 1)
         got = self.client.get('/api/v1/cases/' + case['case_id'], headers=self.headers)
         self.assertEqual(got.json(), case)
+
+    def test_manager_confirms_computed_readiness_with_audited_idempotent_transition(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        path = '/api/v1/cases/' + case['case_id'] + '/confirm-readiness'
+        headers = dict(self.headers, **{'Idempotency-Key': 'confirm-ready-1'})
+        body = {
+            'expected_state_version': case['state_version'],
+            'reason': 'Manager verified the supporting documents.',
+        }
+
+        response = self.client.post(path, json=body, headers=headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        confirmed = response.json()
+        self.assertEqual(confirmed['readiness_status'], 'ready')
+        self.assertEqual(confirmed['state_version'], case['state_version'] + 1)
+        self.assertEqual(self.client.post(path, json=body, headers=headers).json(), confirmed)
+        audit = self.client.get(
+            '/api/v1/cases/' + case['case_id'] + '/audit-events', headers=self.headers
+        ).json()['items']
+        self.assertEqual(audit[-1]['action'], 'confirm_readiness')
+        self.assertEqual(audit[-1]['reason'], body['reason'])
+
+    def test_reopen_preserves_evidence_is_idempotent_and_allows_reconfirmation(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        base = '/api/v1/cases/' + case['case_id']
+        confirmed = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': case['state_version'], 'reason': 'Reviewed.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm'})).json()
+        headers = dict(self.headers, **{'Idempotency-Key': 'reopen'})
+        body = {'expected_state_version': confirmed['state_version'], 'reason': 'Confirmation was premature.'}
+        response = self.client.post(base + '/reopen', json=body, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        reopened = response.json()
+        self.assertEqual(reopened['readiness_status'], 'ready_for_confirmation')
+        self.assertEqual(reopened['requirements'], confirmed['requirements'])
+        self.assertEqual(reopened['state_version'], confirmed['state_version'] + 1)
+        self.assertEqual(self.client.post(base + '/reopen', json=body, headers=headers).json(), reopened)
+        events = self.client.get(base + '/audit-events', headers=headers).json()['items']
+        self.assertEqual([e['action'] for e in events].count('reopen_case'), 1)
+        self.assertEqual(events[-1]['reason'], body['reason'])
+        self.assertEqual(self.client.post(base + '/reopen', json={**body, 'reason': 'Changed'}, headers=headers).status_code, 409)
+        again = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': reopened['state_version'], 'reason': 'Checked again.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-again'}))
+        self.assertEqual(again.json()['readiness_status'], 'ready')
+
+    def test_read_only_manager_cannot_reopen(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        base = '/api/v1/cases/' + case['case_id']
+        confirmed = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': case['state_version'], 'reason': 'Reviewed.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-readonly'})).json()
+        access = access_config()
+        access = access.model_copy(update={'principals': [
+            p.model_copy(update={'can_manage': False}) for p in access.principals
+        ]})
+        with TestClient(create_app(self.url, access)) as reader:
+            response = reader.post(base + '/reopen', json={
+                'expected_state_version': confirmed['state_version'], 'reason': 'Recheck.'
+            }, headers=dict(self.headers, **{'Idempotency-Key': 'readonly-reopen'}))
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(reader.get(base, headers=self.headers).json(), confirmed)
+
+    def test_reopen_rejects_invalid_state_version_reason_and_scope(self):
+        case = self.create()
+        path = '/api/v1/cases/' + case['case_id'] + '/reopen'
+        body = {'expected_state_version': 1, 'reason': 'Recheck.'}
+        headers = dict(self.headers, **{'Idempotency-Key': 'reopen-invalid'})
+        self.assertEqual(self.client.post(path, json=body, headers=headers).json()['error']['code'], 'CASE_NOT_READY')
+        self.assertEqual(self.client.post(path, json={**body, 'expected_state_version': 99}, headers=headers).json()['error']['code'], 'STALE_STATE')
+        self.assertEqual(self.client.post(path, json={**body, 'reason': '   '}, headers=headers).status_code, 422)
+        self.assertEqual(self.client.post(path, json=body).status_code, 401)
+        self.assertEqual(self.client.post(path, json=body, headers={**headers, 'Authorization': 'Bearer ' + OTHER_TOKEN}).status_code, 404)
+
+    def test_readiness_confirmation_rejects_collecting_and_stale_cases(self):
+        collecting = self.create()
+        path = '/api/v1/cases/' + collecting['case_id'] + '/confirm-readiness'
+        blocked = self.client.post(path, json={
+            'expected_state_version': collecting['state_version'],
+            'reason': 'Attempt before evidence is complete.',
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-too-soon'}))
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json()['error']['code'], 'CASE_NOT_CONFIRMABLE')
+
+        ready = self.mark_ready_for_confirmation(collecting)
+        stale = self.client.post(path, json={
+            'expected_state_version': ready['state_version'] - 1,
+            'reason': 'Stale browser state.',
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-stale'}))
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()['error']['code'], 'STALE_STATE')
+
+    def test_readiness_confirmation_rejects_an_open_operational_review(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        with self.app.state.store.engine.begin() as conn:
+            conn.execute(insert(reviews).values(
+                review_task_id='review_open_test',
+                case_id=case['case_id'],
+                run_id='run_open_test',
+                record=json.dumps({'status': 'open'}),
+            ))
+        response = self.client.post(
+            '/api/v1/cases/' + case['case_id'] + '/confirm-readiness',
+            json={
+                'expected_state_version': case['state_version'],
+                'reason': 'Attempt while review is open.',
+            },
+            headers=dict(self.headers, **{'Idempotency-Key': 'confirm-open-review'}),
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['error']['code'], 'CASE_NOT_CONFIRMABLE')
 
     def test_authentication_and_cross_client_access(self):
         case = self.create()

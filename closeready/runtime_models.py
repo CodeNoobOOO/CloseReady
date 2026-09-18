@@ -7,6 +7,11 @@ class AnalyseRequest(ContractModel):
     expected_state_version: PositiveInt
 
 
+class RetryRunRequest(ContractModel):
+    expected_state_version: PositiveInt
+    reason: Annotated[Text, Field(max_length=2000)]
+
+
 class ContextArgs(ContractModel):
     pass
 
@@ -34,7 +39,10 @@ class RunRecord(ContractModel):
     case_id: Text
     run_mode: Literal['single'] = 'single'
     start_state_version: PositiveInt
-    status: Literal['queued', 'running', 'completed', 'needs_review', 'failed', 'stale']
+    status: Literal[
+        'queued', 'running', 'completed', 'needs_review', 'failed', 'stale',
+        'resolved', 'superseded',
+    ]
     started_at: Timestamp | None
     finished_at: Timestamp | None
     provider: Text
@@ -58,7 +66,9 @@ class ReviewTaskRecord(ContractModel):
     draft: MessageDraft | None = None
     sent: Literal[False] = False
     created_at: Timestamp
-    resolution: Literal['approved', 'edited_and_approved', 'rejected', 'dismissed'] | None = None
+    resolution: Literal[
+        'approved', 'edited_and_approved', 'rejected', 'dismissed', 'superseded',
+    ] | None = None
     resolved_by: Text | None = None
     resolved_at: Timestamp | None = None
     resolution_reason: Text | None = None

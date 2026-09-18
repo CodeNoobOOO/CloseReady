@@ -25,6 +25,18 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report([row('a', 'held_out', 'single'), row('b', 'held_out', 'multi')])
 
+    def test_matching_scenario_across_modes_is_allowed(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'results.jsonl'
+            path.write_text('\n'.join(json.dumps(row(mode=mode)) for mode in ('single', 'multi', 'manual')))
+            results = report(load(path))
+            self.assertEqual(len(results['groups']), 3)
+
+    def test_development_cannot_leak_into_held_out(self):
+        with self.assertRaises(ValueError):
+            report([row('same', 'development'), row('same', 'held_out')])
+
     def test_duplicate_ids_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'results.jsonl'

@@ -8,9 +8,9 @@ def load(path):
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     if not rows:
         raise ValueError('Evaluation file is empty')
-    ids = [row['scenario_id'] for row in rows]
+    ids = [(row['split'], row['scenario_id'], row['run_mode']) for row in rows]
     if len(ids) != len(set(ids)):
-        raise ValueError('Duplicate scenario_id')
+        raise ValueError('Duplicate scenario result for the same split and mode')
     for row in rows:
         if row['split'] not in ('development', 'validation', 'held_out'):
             raise ValueError('Unknown split')
@@ -52,6 +52,11 @@ def report(rows):
     for row in rows:
         groups.setdefault((row['split'], row['run_mode']), []).append(row)
     result = {'groups': {f'{split}/{mode}': score(group) for (split, mode), group in sorted(groups.items())}}
+    splits_by_id = {}
+    for row in rows:
+        previous = splits_by_id.setdefault(row['scenario_id'], row['split'])
+        if previous != row['split']:
+            raise ValueError('Scenario IDs must not overlap across development, validation and held-out sets')
     validation_ids = {r['scenario_id'] for r in rows if r['split'] == 'validation'}
     held_out_ids = {r['scenario_id'] for r in rows if r['split'] == 'held_out'}
     if validation_ids & held_out_ids:

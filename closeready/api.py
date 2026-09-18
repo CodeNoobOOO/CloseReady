@@ -4,7 +4,7 @@ import os
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
@@ -12,13 +12,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
-from .case_requests import AuditPage, CasePage, ChangeDeadlineRequest, CreateCaseRequest
+from .case_requests import (
+    AuditPage, CasePage, ChangeDeadlineRequest, ConfirmReadinessRequest,
+    CreateCaseRequest, ReopenCaseRequest,
+)
+from .case_references import CaseCommunicationReference
 from .config import AccessConfig, Principal, load_access_config
 from .models import CaseSnapshot
 from .store import DomainError, Store
 from .runtime import AgentRuntime
 from .runtime_models import (
-    AnalyseRequest, OutboxPage, ReviewDecisionRequest, ReviewTaskPage,
+    AnalyseRequest, OutboxPage, RetryRunRequest, ReviewDecisionRequest, ReviewTaskPage,
     ReviewTaskRecord, RunRecord,
 )
 from .runtime_store import RuntimeStore
@@ -28,11 +32,20 @@ from .provider_factory import provider_from_environment
 from .health import HealthStatus
 from .communication_models import (
     AssessReplyRequest, AssessReplyResult, CommitmentPage, DeliverOutboxRequest,
-    DeliveryResult, DispatchRemindersResult, FindingPage, IngestReplyRequest,
-    IngestReplyResult, MailboxPage, ReminderPage, ReplyPage,
+    DeliveryResult, DispatchRemindersResult, FindingPage, InboundPollResult,
+    InboundQuarantinePage, IngestReplyRequest, IngestReplyResult, MailboxPage,
+    ReminderPage, ReplyPage,
 )
 from .communication_store import CommunicationStore
 from pathlib import Path
+from .communication_store import communication_metadata
+from .document_models import (
+    DocumentFinding, DocumentJobRecord, DocumentPage, DocumentRecord,
+    DocumentReviewDecisionPage, DocumentReviewDecisionRecord,
+    DocumentReviewDecisionRequest,
+)
+from .document_store import MAX_DOCUMENT_BYTES, DocumentStore, document_metadata
+from .runtime_store import runtime_metadata
 
 
 def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | None = None,
@@ -40,6 +53,9 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     store = Store(database_url, access)
     runtime_store = RuntimeStore(store)
     communication = CommunicationStore(store, runtime_store, mail)
+    document_store = DocumentStore(
+        store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
+    communication.document_store = document_store
 
     @asynccontextmanager
     async def lifespan(app):
@@ -51,18 +67,19 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     app = FastAPI(title='CloseReady Case API', version='0.1.0', lifespan=lifespan)
     @app.get('/app', include_in_schema=False)
     def frontend():
-        return FileResponse(Path(__file__).parent / 'frontend' / 'index.html')
+        return FileResponse(Path(__file__).parent / 'frontend' / 'index.html', headers={'Cache-Control': 'no-store'})
 
     @app.get('/app/app.js', include_in_schema=False)
     def frontend_js():
-        return FileResponse(Path(__file__).parent / 'frontend' / 'app.js', media_type='text/javascript')
+        return FileResponse(Path(__file__).parent / 'frontend' / 'app.js', media_type='text/javascript', headers={'Cache-Control': 'no-store'})
 
     @app.get('/app/style.css', include_in_schema=False)
     def frontend_css():
-        return FileResponse(Path(__file__).parent / 'frontend' / 'style.css', media_type='text/css')
+        return FileResponse(Path(__file__).parent / 'frontend' / 'style.css', media_type='text/css', headers={'Cache-Control': 'no-store'})
     app.state.store = store
     app.state.runtime_store = runtime_store
     app.state.communication = communication
+    app.state.document_store = document_store
     bearer = HTTPBearer(auto_error=False)
 
     def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> Principal:
@@ -94,7 +111,11 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.get('/health/ready', response_model=HealthStatus, include_in_schema=True)
     def ready():
         try:
-            runtime_store.check_ready()
+            store.check_ready(
+                set(runtime_metadata.tables)
+                .union(communication_metadata.tables)
+                .union(document_metadata.tables)
+            )
         except (SQLAlchemyError, RuntimeError):
             raise DomainError('NOT_READY', 'Persistent storage is not ready.', 503) from None
         return HealthStatus(status='ready')
@@ -129,14 +150,110 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def get_case(case_id: str, actor: Actor):
         return store.get_case(actor, case_id)
 
+    @app.get(
+        '/api/v1/cases/{case_id}/communication-reference',
+        response_model=CaseCommunicationReference,
+    )
+    def get_case_communication_reference(case_id: str, actor: Actor):
+        return store.case_communication_reference(actor, case_id)
+
     @app.patch('/api/v1/cases/{case_id}/deadline', response_model=CaseSnapshot)
     def change_deadline(case_id: str, body: ChangeDeadlineRequest, actor: Actor, key: Key):
         return store.change_deadline(actor, case_id, body, key)
+
+    @app.post('/api/v1/cases/{case_id}/reopen', response_model=CaseSnapshot)
+    def reopen_case(case_id: str, body: ReopenCaseRequest, actor: Actor, key: Key):
+        return store.reopen_case(actor, case_id, body, key)
+
+    @app.post('/api/v1/cases/{case_id}/confirm-readiness', response_model=CaseSnapshot)
+    def confirm_readiness(case_id: str, body: ConfirmReadinessRequest, actor: Actor, key: Key):
+        return store.confirm_readiness(actor, case_id, body, key)
 
     @app.get('/api/v1/cases/{case_id}/audit-events', response_model=AuditPage)
     def get_audit(case_id: str, actor: Actor, cursor: Annotated[int, Query(ge=0)] = 0,
                   limit: Annotated[int, Query(ge=1, le=100)] = 50):
         return store.audit_events(actor, case_id, cursor, limit)
+
+    @app.post(
+        '/api/v1/cases/{case_id}/documents',
+        response_model=DocumentJobRecord,
+        status_code=202,
+    )
+    async def upload_document(
+        case_id: str,
+        actor: Actor,
+        key: Key,
+        file: Annotated[UploadFile, File()],
+        expected_state_version: Annotated[int, Form(gt=0)],
+        requirement_id: Annotated[str | None, Form()] = None,
+    ):
+        try:
+            content = await file.read(MAX_DOCUMENT_BYTES + 1)
+        finally:
+            await file.close()
+        return document_store.upload(
+            actor,
+            case_id,
+            requirement_id=requirement_id,
+            expected_state_version=expected_state_version,
+            filename=file.filename or 'document.pdf',
+            media_type=file.content_type or '',
+            content=content,
+            key=key,
+        )
+
+    @app.get(
+        '/api/v1/cases/{case_id}/documents',
+        response_model=DocumentPage,
+    )
+    def list_documents(case_id: str, actor: Actor,
+                       cursor: Annotated[str | None, Query(max_length=128)] = None,
+                       limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return document_store.list_documents(actor, case_id, cursor, limit)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/documents/{document_id}',
+        response_model=DocumentRecord,
+    )
+    def get_document(case_id: str, document_id: str, actor: Actor):
+        return document_store.get_document(actor, case_id, document_id)
+
+    @app.post(
+        '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',
+        response_model=DocumentReviewDecisionRecord,
+    )
+    def decide_document_review(
+            case_id: str, document_id: str,
+            body: DocumentReviewDecisionRequest, actor: Actor, key: Key):
+        return document_store.decide_review(actor, case_id, document_id, body, key)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',
+        response_model=DocumentReviewDecisionPage,
+    )
+    def list_document_review_decisions(
+            case_id: str, document_id: str, actor: Actor,
+            cursor: Annotated[str | None, Query(max_length=128)] = None,
+            limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return document_store.list_review_decisions(
+            actor, case_id, document_id, cursor, limit)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/document-jobs/{job_id}',
+        response_model=DocumentJobRecord,
+    )
+    def get_document_job(case_id: str, job_id: str, actor: Actor):
+        return document_store.get_job(actor, case_id, job_id)
+
+    @app.get(
+        '/api/v1/cases/{case_id}/documents/{document_id}/finding',
+        response_model=DocumentFinding,
+    )
+    def get_document_finding(case_id: str, document_id: str, actor: Actor):
+        finding = document_store.get_finding(actor, case_id, document_id)
+        if finding is None:
+            raise DomainError('NOT_FOUND', 'Document finding not found.', 404)
+        return finding
 
     @app.post('/api/v1/cases/{case_id}/runs', response_model=RunRecord)
     def analyse_case(case_id: str, body: AnalyseRequest, actor: Actor, key: Key):
@@ -168,6 +285,17 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def recover_run(run_id: str, actor: Actor, key: Key):
         # Terminal transition is intrinsically idempotent; no inference is retried.
         return runtime_store.recover(actor, run_id)
+
+    @app.post('/api/v1/runs/{run_id}/retry', response_model=RunRecord, status_code=202)
+    def retry_run(run_id: str, body: RetryRunRequest, actor: Actor, key: Key):
+        if provider is None:
+            raise DomainError('LLM_UNAVAILABLE', 'Live LLM configuration is not enabled.', 503)
+        if not provider.live:
+            raise DomainError('LIVE_LLM_REQUIRED', 'Run retry requires a live LLM provider.', 503)
+        return runtime_store.retry(
+            actor, run_id, expected_state_version=body.expected_state_version,
+            key=key, provider=provider.provider_name, model=provider.model,
+            live=provider.live, reason=body.reason)
 
     @app.get('/api/v1/cases/{case_id}/review-tasks', response_model=ReviewTaskPage)
     def review_tasks(case_id: str, actor: Actor,
@@ -232,6 +360,16 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.post('/api/v1/cases/{case_id}/reminders/dispatch-due', response_model=DispatchRemindersResult)
     def dispatch_reminders(case_id: str, actor: Actor, key: Key):
         return communication.dispatch_due_reminders(actor, case_id, key)
+
+    @app.post('/api/v1/inbound-mail/poll', response_model=InboundPollResult)
+    def poll_inbound_mail(actor: Actor, key: Key):
+        return communication.poll_inbound(actor, key)
+
+    @app.get('/api/v1/inbound-mail/quarantine', response_model=InboundQuarantinePage)
+    def list_inbound_quarantine(actor: Actor,
+                                cursor: Annotated[str | None, Query(max_length=128)] = None,
+                                limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        return communication.list_quarantine(actor, cursor, limit)
 
     return app
 

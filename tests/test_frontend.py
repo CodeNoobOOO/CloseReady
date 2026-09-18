@@ -18,6 +18,8 @@ class FrontendTests(unittest.TestCase):
                 script = client.get('/app/app.js')
                 style = client.get('/app/style.css')
             self.assertEqual(page.status_code, 200)
+            for response in (page, script, style):
+                self.assertEqual(response.headers['cache-control'], 'no-store')
             self.assertIn('CloseReady', page.text)
             self.assertIn('/api/v1', script.text)
             self.assertIn('text/javascript', script.headers['content-type'])

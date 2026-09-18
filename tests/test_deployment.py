@@ -113,7 +113,7 @@ class DeploymentArtifactTests(unittest.TestCase):
     def test_ci_runs_deterministic_checks_without_live_credentials(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
 
-        for command in ('unittest discover', 'compileall', 'pip check', 'docker build'):
+        for command in ('pytest', 'compileall', 'pip check', 'docker build'):
             self.assertIn(command, workflow)
         self.assertNotIn('DEEPSEEK_API_KEY', workflow)
         self.assertNotIn('LLM_API_KEY', workflow)

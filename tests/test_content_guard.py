@@ -21,6 +21,11 @@ class ContentGuardTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assert_unsafe(self.draft(body='Internal reference ' + value))
 
+    def test_allows_customer_visible_case_reference(self):
+        validate_customer_visible_draft(self.draft(
+            subject='[CR-2607-SA48HA7B] July statement',
+            body='Please include this reference in your reply: CR-2607-SA48HA7B'))
+
     def test_allows_structured_requirement_ids_when_visible_text_is_safe(self):
         validate_customer_visible_draft(self.draft(
             subject='Documents: July statement',
