@@ -27,6 +27,14 @@ jobs:
           python-version: '3.11'
           cache: pip
 
+      - name: Set up Node for frontend tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check frontend behavior
+        run: node --test tests/frontend.test.cjs
+
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 

@@ -126,6 +126,58 @@ class CaseApiTests(unittest.TestCase):
         self.assertEqual(audit[-1]['action'], 'confirm_readiness')
         self.assertEqual(audit[-1]['reason'], body['reason'])
 
+    def test_reopen_preserves_evidence_is_idempotent_and_allows_reconfirmation(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        base = '/api/v1/cases/' + case['case_id']
+        confirmed = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': case['state_version'], 'reason': 'Reviewed.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm'})).json()
+        headers = dict(self.headers, **{'Idempotency-Key': 'reopen'})
+        body = {'expected_state_version': confirmed['state_version'], 'reason': 'Confirmation was premature.'}
+        response = self.client.post(base + '/reopen', json=body, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        reopened = response.json()
+        self.assertEqual(reopened['readiness_status'], 'ready_for_confirmation')
+        self.assertEqual(reopened['requirements'], confirmed['requirements'])
+        self.assertEqual(reopened['state_version'], confirmed['state_version'] + 1)
+        self.assertEqual(self.client.post(base + '/reopen', json=body, headers=headers).json(), reopened)
+        events = self.client.get(base + '/audit-events', headers=headers).json()['items']
+        self.assertEqual([e['action'] for e in events].count('reopen_case'), 1)
+        self.assertEqual(events[-1]['reason'], body['reason'])
+        self.assertEqual(self.client.post(base + '/reopen', json={**body, 'reason': 'Changed'}, headers=headers).status_code, 409)
+        again = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': reopened['state_version'], 'reason': 'Checked again.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-again'}))
+        self.assertEqual(again.json()['readiness_status'], 'ready')
+
+    def test_read_only_manager_cannot_reopen(self):
+        case = self.mark_ready_for_confirmation(self.create())
+        base = '/api/v1/cases/' + case['case_id']
+        confirmed = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': case['state_version'], 'reason': 'Reviewed.'
+        }, headers=dict(self.headers, **{'Idempotency-Key': 'confirm-readonly'})).json()
+        access = access_config()
+        access = access.model_copy(update={'principals': [
+            p.model_copy(update={'can_manage': False}) for p in access.principals
+        ]})
+        with TestClient(create_app(self.url, access)) as reader:
+            response = reader.post(base + '/reopen', json={
+                'expected_state_version': confirmed['state_version'], 'reason': 'Recheck.'
+            }, headers=dict(self.headers, **{'Idempotency-Key': 'readonly-reopen'}))
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(reader.get(base, headers=self.headers).json(), confirmed)
+
+    def test_reopen_rejects_invalid_state_version_reason_and_scope(self):
+        case = self.create()
+        path = '/api/v1/cases/' + case['case_id'] + '/reopen'
+        body = {'expected_state_version': 1, 'reason': 'Recheck.'}
+        headers = dict(self.headers, **{'Idempotency-Key': 'reopen-invalid'})
+        self.assertEqual(self.client.post(path, json=body, headers=headers).json()['error']['code'], 'CASE_NOT_READY')
+        self.assertEqual(self.client.post(path, json={**body, 'expected_state_version': 99}, headers=headers).json()['error']['code'], 'STALE_STATE')
+        self.assertEqual(self.client.post(path, json={**body, 'reason': '   '}, headers=headers).status_code, 422)
+        self.assertEqual(self.client.post(path, json=body).status_code, 401)
+        self.assertEqual(self.client.post(path, json=body, headers={**headers, 'Authorization': 'Bearer ' + OTHER_TOKEN}).status_code, 404)
+
     def test_readiness_confirmation_rejects_collecting_and_stale_cases(self):
         collecting = self.create()
         path = '/api/v1/cases/' + collecting['case_id'] + '/confirm-readiness'

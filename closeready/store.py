@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 
 from .case_requests import (
     AuditPage, CasePage, ChangeDeadlineRequest, ConfirmReadinessRequest,
-    CreateCaseRequest,
+    CreateCaseRequest, ReopenCaseRequest,
 )
 from .case_references import CaseCommunicationReference, CaseReferenceResolution
 from .config import AccessConfig, Principal
@@ -354,6 +354,58 @@ class Store:
                 error = exc
                 self._audit(
                     conn, actor, 'confirm_readiness',
+                    'stale' if exc.code == 'STALE_STATE' else 'blocked', exc.code,
+                    current, old=current.state_version if current else None,
+                )
+        if error:
+            raise error
+        return result
+
+    def reopen_case(
+            self, actor: Principal, case_id: str,
+            request: ReopenCaseRequest, key: str) -> CaseSnapshot:
+        error, current = None, None
+        operation = 'reopen_case:' + case_id
+        digest = self._digest(request)
+        with self.write() as conn:
+            try:
+                current = self._case(conn, actor, case_id)
+                if not actor.can_manage:
+                    raise forbidden()
+                replay = self._replay(conn, actor, operation, key, digest)
+                if replay:
+                    return replay
+                if current.state_version != request.expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                if current.readiness_status != 'ready':
+                    raise DomainError(
+                        'CASE_NOT_READY',
+                        'Only a confirmed ready case can be reopened.',
+                        409,
+                    )
+                result = CaseSnapshot.model_validate({
+                    **current.model_dump(mode='json'),
+                    'state_version': current.state_version + 1,
+                    'readiness_status': 'ready_for_confirmation',
+                })
+                changed = conn.execute(update(cases).where(
+                    cases.c.case_id == case_id,
+                    cases.c.state_version == request.expected_state_version,
+                ).values(
+                    snapshot=result.model_dump_json(),
+                    state_version=result.state_version,
+                ))
+                if changed.rowcount != 1:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                self._audit(
+                    conn, actor, 'reopen_case', 'executed', request.reason,
+                    result, old=current.state_version, new=result.state_version,
+                )
+                self._remember(conn, actor, operation, key, digest, result)
+            except DomainError as exc:
+                error = exc
+                self._audit(
+                    conn, actor, 'reopen_case',
                     'stale' if exc.code == 'STALE_STATE' else 'blocked', exc.code,
                     current, old=current.state_version if current else None,
                 )
