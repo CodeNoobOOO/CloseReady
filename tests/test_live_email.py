@@ -320,6 +320,22 @@ class LiveCommunicationStoreTests(unittest.TestCase):
         self.assertEqual(document.original_filename, 'july-statement.pdf')
         self.assertEqual(document.media_type, 'application/pdf')
 
+    def test_pdf_attachment_uses_case_version_after_reply_ingestion(self):
+        result = self.db.process_inbound(inbound(
+            provider_message_id='inbound-pdf-current-version',
+            subject=f'[{self.reference}] statement',
+            body=f'Attached. {self.reference}',
+            attachments=(InboundAttachment(
+                filename='july-statement.pdf', content_type='application/pdf',
+                content=b'%PDF-1.4 synthetic statement'),)))
+
+        document = self.db.document_store.get_document(
+            self.actor, self.case.case_id, result.document_ids[0])
+        current = self.store.get_case(self.actor, self.case.case_id)
+
+        self.assertEqual(document.input_state_version, current.state_version)
+        self.assertEqual(result.reply.attachment_document_ids, result.document_ids)
+
     def test_duplicate_inbound_message_is_idempotent(self):
         message = inbound(subject=f'[{self.reference}] hi', body=self.reference)
         first = self.db.process_inbound(message)

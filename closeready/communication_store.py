@@ -817,6 +817,23 @@ class CommunicationStore:
             provider_message_id=message.provider_message_id, associated=True,
             case_id=resolution.case_id, reply=ingested.reply, document_ids=document_ids)
 
+    def _attach_documents_to_reply(self, actor, case_id: str, reply: ReplyRecord,
+                                   document_ids: list[str]) -> ReplyRecord:
+        if not document_ids:
+            return reply
+        updated_reply = reply.model_copy(update={
+            'attachment_document_ids': list(document_ids),
+        })
+        with self.store.write() as conn:
+            self.store._case(conn, actor, case_id)
+            updated = conn.execute(update(replies).where(
+                replies.c.reply_id == reply.reply_id,
+                replies.c.case_id == case_id,
+            ).values(record=updated_reply.model_dump_json()))
+            if updated.rowcount != 1:
+                raise DomainError('NOT_FOUND', 'Reply not found.', 404)
+        return updated_reply
+
     def process_inbound(self, message: InboundMail, actor=None) -> InboundProcessResult:
         seen = self._seen_result(message.provider_message_id)
         if seen is not None:
@@ -835,8 +852,16 @@ class CommunicationStore:
             self._store_seen(message.provider_message_id, result)
             return result
         case_actor = self._actor_for_case(case, actor)
-        document_ids = self._upload_inbound_pdfs(case_actor, case, message)
-        result = self._ingest_resolved_reply(case_actor, case, message, resolution, document_ids)
+        result = self._ingest_resolved_reply(case_actor, case, message, resolution, [])
+        if result.associated:
+            current = self.store.get_case(case_actor, case.case_id)
+            document_ids = self._upload_inbound_pdfs(case_actor, current, message)
+            reply = self._attach_documents_to_reply(
+                case_actor, case.case_id, result.reply, document_ids)
+            result = result.model_copy(update={
+                'reply': reply,
+                'document_ids': document_ids,
+            })
         self._store_seen(message.provider_message_id, result)
         return result
 
