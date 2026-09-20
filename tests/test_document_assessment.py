@@ -458,3 +458,24 @@ def test_llm_analysis_without_evidence_needs_review():
     assert finding.evidence_refs == []
     assert finding.uncertainty_reasons
     assert finding.issues
+
+
+def test_llm_duplicate_document_needs_review():
+    case = make_llm_case()
+    requirement = case.requirements[0]
+
+    analysis = make_valid_llm_bank_analysis()
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_duplicate",
+        analysis=analysis,
+        requirement_id=requirement.requirement_id,
+        duplicate=True,
+    )
+
+    assert finding.result == "needs_review"
+
+    assert any("duplicate" in reason.lower() for reason in finding.uncertainty_reasons)
+
+    assert finding.evidence_refs

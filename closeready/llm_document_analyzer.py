@@ -5,6 +5,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMProvider, ProviderError
+from time import monotonic
 
 DocumentType = Literal[
     "bank_statement",
@@ -14,6 +15,20 @@ DocumentType = Literal[
 ]
 
 
+class DocumentAnalysisTelemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+    prompt_schema_version: str
+    latency_ms: int = Field(ge=0)
+    usage: dict | None = None
+    request_id: str | None = None
+    error_code: str | None = None
+    repair_count: int = Field(ge=0)
+
+
+DOCUMENT_ANALYSIS_VERSION = "document-analysis-v1"
 # ---------------------------------------------------------------------------
 # Authorised input supplied by the backend
 # ---------------------------------------------------------------------------
@@ -249,17 +264,21 @@ class LiveLLMDocumentAnalyzer:
         self,
         provider: LLMProvider,
         max_repairs: int = 1,
+        
     ):
         if max_repairs < 0:
             raise ValueError("max_repairs must be zero or greater.")
 
         self.provider = provider
         self.max_repairs = max_repairs
+        self.last_telemetry: DocumentAnalysisTelemetry | None = None
 
     def analyze(
         self,
         request: DocumentAnalysisRequest,
     ) -> LLMDocumentAnalysis:
+        started = monotonic()
+
         context = analysis_context(request)
 
         messages = [
@@ -270,7 +289,8 @@ class LiveLLMDocumentAnalyzer:
             {
                 "role": "user",
                 "content": (
-                    "Analyse this authorised document context:\n" + json.dumps(context)
+                    "Analyse this authorised document context:\n"
+                    + json.dumps(context)
                 ),
             },
         ]
@@ -283,8 +303,20 @@ class LiveLLMDocumentAnalyzer:
                     messages,
                     tool_definitions(),
                 )
-
             except ProviderError as exc:
+                self.last_telemetry = DocumentAnalysisTelemetry(
+                    provider=self.provider.provider_name,
+                    model=self.provider.model,
+                    prompt_schema_version=DOCUMENT_ANALYSIS_VERSION,
+                    latency_ms=int(
+                        (monotonic() - started) * 1000
+                    ),
+                    usage=None,
+                    request_id=None,
+                    error_code=exc.code,
+                    repair_count=repairs,
+                )
+
                 raise DocumentAnalysisError(exc.code) from exc
 
             messages.append(completion.message)
@@ -304,11 +336,39 @@ class LiveLLMDocumentAnalyzer:
                         call.arguments
                     )
 
+                    self.last_telemetry = DocumentAnalysisTelemetry(
+                        provider=self.provider.provider_name,
+                        model=self.provider.model,
+                        prompt_schema_version=DOCUMENT_ANALYSIS_VERSION,
+                        latency_ms=int(
+                            (monotonic() - started) * 1000
+                        ),
+                        usage=completion.usage,
+                        request_id=completion.request_id,
+                        error_code=None,
+                        repair_count=repairs,
+                    )
+
                     return args.analysis
 
                 except ValidationError:
                     if repairs >= self.max_repairs:
-                        raise DocumentAnalysisError("INVALID_MODEL_OUTPUT")
+                        self.last_telemetry = DocumentAnalysisTelemetry(
+                            provider=self.provider.provider_name,
+                            model=self.provider.model,
+                            prompt_schema_version=DOCUMENT_ANALYSIS_VERSION,
+                            latency_ms=int(
+                                (monotonic() - started) * 1000
+                            ),
+                            usage=completion.usage,
+                            request_id=completion.request_id,
+                            error_code="INVALID_MODEL_OUTPUT",
+                            repair_count=repairs,
+                        )
+
+                        raise DocumentAnalysisError(
+                            "INVALID_MODEL_OUTPUT"
+                        )
 
                     repairs += 1
 
@@ -318,9 +378,10 @@ class LiveLLMDocumentAnalyzer:
                             "tool_call_id": call.call_id,
                             "content": json.dumps(
                                 {
-                                    "error": ("INVALID_MODEL_OUTPUT"),
+                                    "error": "INVALID_MODEL_OUTPUT",
                                     "message": (
-                                        "Arguments do not match " "the required schema."
+                                        "Arguments do not match "
+                                        "the required schema."
                                     ),
                                 }
                             ),
@@ -331,7 +392,22 @@ class LiveLLMDocumentAnalyzer:
 
             # Zero calls or multiple matching calls are both invalid.
             if repairs >= self.max_repairs:
-                raise DocumentAnalysisError("MISSING_DOCUMENT_ANALYSIS")
+                self.last_telemetry = DocumentAnalysisTelemetry(
+                    provider=self.provider.provider_name,
+                    model=self.provider.model,
+                    prompt_schema_version=DOCUMENT_ANALYSIS_VERSION,
+                    latency_ms=int(
+                        (monotonic() - started) * 1000
+                    ),
+                    usage=completion.usage,
+                    request_id=completion.request_id,
+                    error_code="MISSING_DOCUMENT_ANALYSIS",
+                    repair_count=repairs,
+                )
+
+                raise DocumentAnalysisError(
+                    "MISSING_DOCUMENT_ANALYSIS"
+                )
 
             repairs += 1
 
