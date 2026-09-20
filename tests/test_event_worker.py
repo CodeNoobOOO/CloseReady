@@ -18,6 +18,7 @@ from closeready.runtime_store import RuntimeStore, events, runs
 from closeready.store import Store
 
 
+
 TOKEN = 'event-worker-synthetic-token'
 
 
@@ -423,6 +424,75 @@ class WorkerTests(_RuntimeFixture):
         for invalid in ('0', '61', 'not-a-number'):
             with self.subTest(invalid=invalid), self.assertRaises(ArgumentTypeError):
                 polling_seconds(invalid)
+
+
+class WorkerEnvironmentTests(unittest.TestCase):
+    def test_environment_worker_shares_provider_with_document_analyzer(self):
+        from unittest.mock import patch
+
+        from closeready.llm_document_analyzer import (
+            LiveLLMDocumentAnalyzer,
+        )
+        from closeready.worker import worker_from_environment
+
+        provider = ScriptedProvider([])
+
+        with TemporaryDirectory() as directory:
+            database_url = (
+                "sqlite:///" + (Path(directory) / "worker-environment.db").as_posix()
+            )
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CLOSEREADY_ACCESS_CONFIG": "synthetic-access.json",
+                        "CLOSEREADY_DATABASE_URL": database_url,
+                        "CLOSEREADY_LLM_ENABLED": "1",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "closeready.worker.load_access_config",
+                    return_value=access_config(),
+                ),
+                patch(
+                    "closeready.worker.provider_from_environment",
+                    return_value=provider,
+                ),
+            ):
+                worker = worker_from_environment()
+
+            try:
+                self.assertIs(
+                    worker.provider,
+                    provider,
+                )
+
+                self.assertIsNotNone(
+                    worker.document_processor,
+                )
+                assert worker.document_processor is not None
+
+                analyzer = worker.document_processor.analyzer
+
+                self.assertIsInstance(
+                    analyzer,
+                    LiveLLMDocumentAnalyzer,
+                )
+
+                assert isinstance(
+                    analyzer,
+                    LiveLLMDocumentAnalyzer,
+                )
+
+                self.assertIs(
+                    analyzer.provider,
+                    provider,
+                )
+
+            finally:
+                worker.runtime_store.store.engine.dispose()
 
 
 if __name__ == '__main__':

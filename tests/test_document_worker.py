@@ -23,9 +23,11 @@ from closeready.runtime_store import RuntimeStore
 from closeready.store import DomainError, Store
 from closeready.worker import AgentWorker
 from test_case_api import access_config, case_request
+from closeready.llm import ProviderError
 from closeready.llm_document_analyzer import (
     LLMDocumentAnalysis,
     LLMDocumentEvidence,
+    LiveLLMDocumentAnalyzer,
     ScriptedDocumentAnalyzer,
 )
 
@@ -34,6 +36,16 @@ Statement Period: 01 July 2026 to 31 July 2026
 Entity ID: entity_demo
 Account Ref: account_demo
 """
+class FailingDocumentProvider:
+    provider_name = "failing_test"
+    model = "failing-model"
+    live = True
+
+    def complete(self, messages, tools):
+        raise ProviderError(
+            "NETWORK_ERROR",
+            True,
+        )
 
 
 def extracted(text=GOOD_TEXT, file_hash="test-hash"):
@@ -660,6 +672,69 @@ class DocumentWorkerTests(unittest.TestCase):
                 "evidence" in reason.lower()
                 for reason in finding.uncertainty_reasons
             )
+        )
+
+        unchanged = self.store.get_case(
+            self.actor,
+            llm_case.case_id,
+        )
+
+        self.assertEqual(
+            unchanged.requirements[0].status,
+            "missing",
+        )
+    def test_document_provider_network_error_is_controlled_failure(self):
+        llm_case = self.create_llm_case()
+        requirement = llm_case.requirements[0]
+
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=requirement.requirement_id,
+            expected_state_version=llm_case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-provider-failure",
+            key="llm-provider-failure",
+        )
+
+        token = self.documents.claim(job.job_id)
+
+        self.assertIsNotNone(token)
+        assert token is not None
+
+        analyzer = LiveLLMDocumentAnalyzer(
+            FailingDocumentProvider()
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\n"
+                    "Entity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: "
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(
+            job.job_id,
+            token,
+        )
+
+        self.assertEqual(
+            result.status,
+            "failed",
+        )
+
+        self.assertEqual(
+            result.error_code,
+            "DOCUMENT_PROCESSING_FAILED",
         )
 
         unchanged = self.store.get_case(
