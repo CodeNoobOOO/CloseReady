@@ -72,6 +72,7 @@ class EvidenceRef(ContractModel):
 class RequirementScope(ContractModel):
     entity_id: Text
     account_ref: Text | None
+    masked_account_identifier: str | None = None
     coverage_start: CalendarDate | None
     coverage_end: CalendarDate | None
 

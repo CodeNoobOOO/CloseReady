@@ -187,6 +187,66 @@ class DocumentApiTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 200, rejected.text)
         self.assertEqual(rejected.json()['document_status'], 'rejected')
 
+    def test_manager_cannot_accept_known_wrong_period(self):
+        from unittest.mock import patch
+        real_assess = assess_document
+        def wrong_period(**kwargs):
+            return real_assess(**kwargs).model_copy(update={
+                'detected_period': '2026-06', 'coverage_start': __import__('datetime').date(2026,6,1),
+                'coverage_end': __import__('datetime').date(2026,6,30)})
+        with patch('test_document_api.assess_document', side_effect=wrong_period):
+            job = self.process_for_review(key='wrong-period-review')
+        response = self.client.post(
+            f'/api/v1/cases/{self.case["case_id"]}/documents/{job["document_id"]}/review-decisions',
+            json={'expected_state_version': 1, 'decision': 'accept_for_requirement',
+                  'target_requirement_id': self.requirement_id, 'reason': 'Try to override mismatch.'},
+            headers={'Authorization': 'Bearer ' + TOKEN, 'Idempotency-Key': 'wrong-period-accept'})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['error']['code'], 'DOCUMENT_REQUIREMENT_CONFLICT')
+
+    def test_reopen_accepted_document_preserves_history_and_invalidates_ready(self):
+        job = self.process_for_review()
+        base = f'/api/v1/cases/{self.case["case_id"]}'
+        path = base + f'/documents/{job["document_id"]}/review-decisions'
+        headers = {'Authorization': 'Bearer ' + TOKEN, 'Idempotency-Key': 'accept-before-undo'}
+        accepted = self.client.post(path, json={
+            'expected_state_version': 1, 'decision': 'accept_for_requirement',
+            'target_requirement_id': self.requirement_id, 'reason': 'Initial manual verification.'
+        }, headers=headers)
+        self.assertEqual(accepted.status_code, 200)
+        confirmed = self.client.post(base + '/confirm-readiness', json={
+            'expected_state_version': 2, 'reason': 'Confirmed.'
+        }, headers={**headers, 'Idempotency-Key': 'confirm-before-undo'})
+        self.assertEqual(confirmed.status_code, 200)
+        headers['Idempotency-Key'] = 'undo-document'
+        body = {'expected_state_version': 3, 'decision': 'reopen_review',
+                'target_requirement_id': None, 'reason': 'Recheck account evidence.'}
+        result = self.client.post(path, json=body, headers=headers)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()['document_status'], 'needs_review')
+        self.assertEqual(self.client.post(path, json=body, headers=headers).json(), result.json())
+        current = self.client.get(base, headers=headers).json()
+        self.assertEqual(current['readiness_status'], 'collecting')
+        self.assertEqual(current['state_version'], 4)
+        self.assertEqual(current['requirements'][0]['status'], 'awaiting_review')
+        self.assertEqual(current['requirements'][0]['evidence_refs'], [])
+        history = self.client.get(path, headers=headers).json()['items']
+        self.assertCountEqual([x['decision'] for x in history], ['accept_for_requirement', 'reopen_review'])
+        original = next(x for x in history if x['decision'] == 'accept_for_requirement')
+        self.assertEqual(original['reason'], 'Initial manual verification.')
+        self.assertTrue(original['source_finding']['evidence_refs'])
+        stale = self.client.post(path, json=body, headers={**headers, 'Idempotency-Key': 'stale-undo'})
+        self.assertEqual(stale.json()['error']['code'], 'STALE_STATE')
+        repeated = self.client.post(path, json={**body, 'expected_state_version': 4}, headers={**headers, 'Idempotency-Key': 'repeat-undo'})
+        self.assertEqual(repeated.json()['error']['code'], 'DOCUMENT_NOT_REOPENABLE')
+        rejected = self.client.post(path, json={
+            'expected_state_version': 4, 'decision': 'reject_document',
+            'target_requirement_id': None, 'reason': 'Incorrect account.'
+        }, headers={**headers, 'Idempotency-Key': 'reject-after-undo'})
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(self.client.get(base, headers=headers).json()['requirements'][0]['status'], 'missing')
+        self.assertEqual(len(self.client.get(path, headers=headers).json()['items']), 3)
+
     def test_upload_requires_authentication_and_current_case_state(self):
         path = f"/api/v1/cases/{self.case['case_id']}/documents"
         response = self.client.post(

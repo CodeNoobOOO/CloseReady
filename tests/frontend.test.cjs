@@ -77,3 +77,12 @@ test('undo confirmation is available only for ready cases',()=>{
   assert.doesNotMatch(run(c,'renderOverview()'),/data-flow="reopen"/);
   assert.match(run(c,'renderOverview()'),/data-flow="ready" >Confirm ready/);
 });
+
+test('document undo appears only for evidence supporting an accepted requirement',()=>{
+  const c=sandbox();
+  run(c,`state.data=${JSON.stringify({caseData:{requirements:[{requirement_id:'r',document_type:'bank_statement',status:'accepted',scope:{entity_id:'e'},evidence_refs:[{document_id:'d'}]}]},documents:[{document_id:'d',requirement_id:'r',status:'processed',original_filename:'test.pdf',size_bytes:100}]})}`);
+  assert.match(run(c,'renderDocuments()'),/Undo acceptance \/ review again/);
+  run(c,"state.data.caseData.requirements[0].status='awaiting_review';state.data.documents[0].status='needs_review'");
+  assert.doesNotMatch(run(c,'renderDocuments()'),/Undo acceptance/);
+  assert.match(run(c,'renderDocuments()'),/Review document/);
+});

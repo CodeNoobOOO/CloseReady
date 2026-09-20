@@ -37,7 +37,7 @@ Case navigation uses a generation counter so late responses cannot replace the c
 
 Run `.venv/bin/python -m pytest -q` and `node --test tests/frontend.test.cjs` (Node 22+). The latter covers case races, disconnect, mutation retry identity and checklist/readiness display. CI runs both.
 
-The integrated backend is `integration/student2-student3` at `4d670f5`. Its document worker uses deterministic assessment; the separate LLM document-analysis feature branch has not been integrated. Follow-up pause/resume has no public route yet. The UI does not bypass these missing capabilities or claim OCR, live email verification, multi-agent evaluation or a finished submission video/write-up. Actual business accuracy and held-out results remain separate evaluation work.
+The integration builds on `integration/student2-student3` at `4d670f5`. The document worker now integrates the LLM analyser from `feat/text-pdf-intelligence` (551755c), with independent rule checks and grounded quotes. Follow-up pause/resume has no public route yet. The UI does not bypass these missing capabilities or claim OCR, live email verification, multi-agent evaluation or a finished submission video/write-up. Actual business accuracy and held-out results remain separate evaluation work.
 
 ## Integration verification — 2026-09-18
 
@@ -50,3 +50,13 @@ Confirmed cases expose **Undo ready confirmation**. A manager must provide a rea
 ### Reopen regression — 2026-09-19
 
 An isolated browser case passed document acceptance → confirm (version 3) → cancel undo with no change → reasoned undo (version 4) → confirm again (version 5). Accepted evidence survived reopening; the original confirmation and new reopen reason remained visible in the audit timeline. API tests also cover scope, authentication, read-only permissions, blank reasons, stale versions and idempotent replay. Live LLM calls and real email delivery were not rerun for this change.
+
+## Undo document acceptance
+
+The document review endpoint also accepts `decision: "reopen_review"`, with `target_requirement_id: null`, the current `expected_state_version` and a mandatory reason. Only managers may reopen processed documents currently supporting accepted requirements. It moves document/job to `needs_review`, linked requirements to `awaiting_review` with pending review, removes this document from active accepted evidence, and moves the case (including a previously ready case) to `collecting`. Other evidence is preserved; all source findings and earlier review decisions remain in history. A new decision and audit entry record the undo. Requests retain scope, version and idempotency checks. It does not restart cancelled reminders or send mail. The frontend exposes **Undo acceptance / review again**, followed by the existing review controls. No database migration is needed.
+
+## Automatic document first review
+
+With `CLOSEREADY_DOCUMENT_REVIEW_MODE=llm` (worker default), each queued PDF receives live AI analysis using the configured provider. `rules` explicitly selects rule-only processing. A case upload itself does not mean acceptance: verified coverage may be auto-accepted only when the model assessment and independent rule checks both pass the existing gate. Issues, uncertain identity or unverified evidence wait for human review. Model failure produces an explicit `AI_REVIEW_UNAVAILABLE` review finding, never silent rule-only acceptance. Scans remain unsupported. Documents exceeding 60,000 extracted characters require human review.
+
+Checklist assessment panels retain original issues and source evidence after undo. Old findings are labelled **Automated rule review**; new model results show **AI first review** and model name. **Run AI first review** on a pending document queues reanalysis (it consumes API credit in LLM mode). Historical decisions retain the prior source finding. Known type, period, identity or coverage conflicts cannot be accepted directly. This increment does not provide a complete model-cost/latency evaluation trace for document analysis.

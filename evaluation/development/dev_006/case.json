@@ -1,0 +1,25 @@
+{
+  "client_id": "client_dev_006",
+  "accounting_period": "2026-07",
+  "timezone": "Asia/Singapore",
+  "owner_user_id": "evaluation_manager",
+  "due_at": "2026-08-20T17:00:00+08:00",
+  "policy_id": "policy_dev_006",
+  "requirements": [
+    {
+      "document_type": "bank_statement",
+      "accounting_period": "2026-07",
+      "scope": {
+        "entity_id": "entity_dev_006",
+        "account_ref": "account_dev_006",
+        "coverage_start": "2026-07-01",
+        "coverage_end": "2026-07-31"
+      },
+      "completion_rule": {
+        "kind": "coverage",
+        "expected_item_refs": [],
+        "allow_multiple_documents": true
+      }
+    }
+  ]
+}

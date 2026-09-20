@@ -1,0 +1,5 @@
+SYNTHETIC TEST DATA - NOT A REAL BANK DOCUMENT
+Bank Statement
+Statement Period: 01 July 2026 to 15 July 2026
+Entity ID: entity_dev_004
+Account Ref: account_dev_004

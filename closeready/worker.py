@@ -88,12 +88,19 @@ def worker_from_environment():
     document_store = DocumentStore(
         store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
     communication.document_store = document_store
+    provider = provider_from_environment()
+    from .document_ai_review import AIDocumentReviewer
+    mode = os.environ.get('CLOSEREADY_DOCUMENT_REVIEW_MODE', 'llm')
+    if mode not in ('llm', 'rules'):
+        raise RuntimeError('Document review mode must be llm or rules.')
+    processor = (DocumentProcessor(document_store, assessor=AIDocumentReviewer(provider))
+                 if mode == 'llm' else DocumentProcessor(document_store))
     return AgentWorker(
         runtime_store,
-        provider_from_environment(),
+        provider,
         access,
         document_store=document_store,
-        document_processor=DocumentProcessor(document_store),
+        document_processor=processor,
         communication=communication,
     )
 

@@ -1,0 +1,5 @@
+Invoice
+Invoice No: INV-dev_006
+Entity ID: entity_dev_006
+Date: 2026-07-10
+Total: SGD 120.00

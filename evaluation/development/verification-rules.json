@@ -1,0 +1,126 @@
+{
+  "scope": "Development component integration checks; not full E2E or business metrics",
+  "live": false,
+  "model": null,
+  "results": [
+    {
+      "scenario_id": "dev_001",
+      "mode": "rules",
+      "status": "PASS",
+      "actual_outstanding": [],
+      "readiness": "ready_for_confirmation",
+      "findings": [
+        {
+          "result": "satisfies",
+          "issues": [],
+          "uncertainty_reasons": [],
+          "analysis_source": "rules",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 0.123
+    },
+    {
+      "scenario_id": "dev_002",
+      "mode": "rules",
+      "status": "PASS",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_correction",
+          "issues": [
+            "Document covers 2026-06-01 to 2026-06-30; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [],
+          "analysis_source": "rules",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 0.086
+    },
+    {
+      "scenario_id": "dev_003",
+      "mode": "rules",
+      "status": "PASS",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_correction",
+          "issues": [
+            "Document covers 2026-07-01 to 2026-07-15; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [],
+          "analysis_source": "rules",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 0.097
+    },
+    {
+      "scenario_id": "dev_004",
+      "mode": "rules",
+      "status": "PASS",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_correction",
+          "issues": [
+            "Document covers 2026-07-01 to 2026-07-15; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [],
+          "analysis_source": "rules",
+          "analysis_error": null
+        },
+        {
+          "result": "needs_review",
+          "issues": [
+            "Duplicate document must not create duplicate satisfaction."
+          ],
+          "uncertainty_reasons": [
+            "Exact duplicate file hash detected."
+          ],
+          "analysis_source": "rules",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 0.123
+    },
+    {
+      "scenario_id": "dev_005",
+      "mode": "rules",
+      "status": "NOT_RUN",
+      "reason": "Relative-date reply interpretation requires live model; no scripted answer substituted.",
+      "elapsed_seconds": 0.019
+    },
+    {
+      "scenario_id": "dev_006",
+      "mode": "rules",
+      "status": "PASS",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_correction",
+          "issues": [
+            "Detected document type invoice; bank_statement is required."
+          ],
+          "uncertainty_reasons": [],
+          "analysis_source": "rules",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 0.071
+    }
+  ]
+}

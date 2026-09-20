@@ -379,7 +379,10 @@ class DocumentStore:
                     document_jobs.c.case_id == case_id,
                 )).mappings().one()
                 job = DocumentJobRecord.model_validate_json(job_row["record"])
-                if document.status != "needs_review" or job.status != "needs_review":
+                reopening = request.decision == "reopen_review"
+                if reopening and (document.status != "processed" or job.status != "completed"):
+                    raise DomainError("DOCUMENT_NOT_REOPENABLE", "Only accepted document evidence can be reopened.", 409)
+                if not reopening and (document.status != "needs_review" or job.status != "needs_review"):
                     raise DomainError(
                         "DOCUMENT_NOT_REVIEWABLE",
                         "Only a document waiting for review can be decided.", 409)
@@ -407,7 +410,35 @@ class DocumentStore:
                 next_version = current.state_version + 1
                 requirements = [item.model_dump(mode="json")
                                 for item in current.requirements]
-                if request.decision == "accept_for_requirement":
+                if reopening:
+                    affected = {item.requirement_id for item in current.requirements
+                                if item.status == "accepted" and any(
+                                    ref.document_id == document_id for ref in item.evidence_refs)}
+                    if not affected:
+                        raise DomainError("DOCUMENT_NOT_REOPENABLE", "Document does not support an accepted requirement.", 409)
+                    requirements = [{
+                        **item.model_dump(mode="json"),
+                        "status": "awaiting_review", "reviewer_status": "pending",
+                        "evidence_refs": [ref.model_dump(mode="json") for ref in item.evidence_refs
+                                          if ref.document_id != document_id],
+                    } if item.requirement_id in affected else item.model_dump(mode="json")
+                        for item in current.requirements]
+                    next_document = DocumentRecord.model_validate({
+                        **document.model_dump(mode="json"), "status": "needs_review",
+                    })
+                    next_job = DocumentJobRecord.model_validate({
+                        **job.model_dump(mode="json"), "status": "needs_review",
+                        "error_code": None, "lease_expires_at": None,
+                    })
+                elif request.decision == "accept_for_requirement":
+                    if (finding.detected_type is not None and finding.detected_type != target.document_type
+                            or finding.detected_period is not None and finding.detected_period != target.accounting_period
+                            or finding.entity_match == "mismatch" or finding.account_match == "mismatch"
+                            or target.completion_rule.kind == "coverage" and (
+                                finding.coverage_start is not None and finding.coverage_start > target.scope.coverage_start
+                                or finding.coverage_end is not None and finding.coverage_end < target.scope.coverage_end)):
+                        raise DomainError("DOCUMENT_REQUIREMENT_CONFLICT",
+                            "Document type, period, identity or coverage conflicts with the requirement. Reject it or supply corrected evidence.", 409)
                     if not finding.evidence_refs:
                         raise DomainError(
                             "INSUFFICIENT_EVIDENCE",
@@ -431,6 +462,12 @@ class DocumentStore:
                         "status": "completed", "error_code": None,
                     })
                 elif request.decision == "reject_document":
+                    requirements = [{
+                        **item.model_dump(mode="json"), "status": "missing",
+                        "reviewer_status": "not_required",
+                    } if item.requirement_id == document.requirement_id
+                        and item.status == "awaiting_review" and not item.evidence_refs
+                        else item.model_dump(mode="json") for item in current.requirements]
                     next_document = DocumentRecord.model_validate({
                         **document.model_dump(mode="json"), "status": "rejected",
                     })

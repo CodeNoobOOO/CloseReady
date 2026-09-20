@@ -14,6 +14,15 @@ async function api(path, options={}){
   return result;
 }
 async function pages(path){let items=[],cursor=null;do{const q=new URLSearchParams({limit:'100'});if(cursor!==null)q.set('cursor',cursor);const page=await api(`${path}?${q}`);items.push(...page.items);cursor=page.next_cursor}while(cursor!==null);return items}
+// Display-only labels for the known local synthetic cases; never business state.
+function demoScenario(id){
+  return ({
+    'case_7271f8597f6e4f5aa6b15084d4af0597':{title:'AI follow-up workflow',help:'Test draft generation, manager approval, simulated delivery and reply analysis. This case has existing history. Generating a new draft uses the live model.'},
+    'case_af89cc4fcd3c4ca393d204ddf3fac666':{title:'Wrong-period document',help:'Inspect the period mismatch and correction evidence. Reject the incorrect document or submit the correct period. If previously accepted, undo acceptance to review it again.'},
+    'case_1d5a0f7a1ce842c09c22a40397a075b9':{title:'Human document review',help:'Inspect evidence and recorded review decisions. Undo document acceptance to test review again, or confirm readiness when all requirements are resolved.'},
+    'case_ddebd8587d31443cbbebe3e84cdea712':{title:'Readiness confirmation and undo',help:'Test final confirmation, undo and reconfirmation. Undoing final confirmation preserves accepted documents; undoing document acceptance requires review again.'},
+  })[id];
+}
 async function loadCases(){
   if(!state.token)return;
   const token=state.token;
@@ -21,7 +30,7 @@ async function loadCases(){
     const cases=await pages('/cases');
     if(token!==state.token)return;
     state.cases=cases;
-    $('cases').innerHTML=cases.map(c=>`<button class="case ${state.selected===c.case_id?'active':''}" data-case="${esc(c.case_id)}"><b>${esc(c.client_id)}</b><small>${esc(c.accounting_period)} · ${esc(c.readiness_status)}</small><small>Case …${esc(c.case_id.slice(-6))}</small></button>`).join('')||'<p class="muted">No cases in your scope.</p>';
+    $('cases').innerHTML=cases.map(c=>`<button class="case ${state.selected===c.case_id?'active':''}" data-case="${esc(c.case_id)}"><b>${esc(c.client_id)}</b>${demoScenario(c.case_id)?`<small class="scenario-label">${esc(demoScenario(c.case_id).title)}</small>`:''}<small>${esc(c.accounting_period)} · ${esc(c.readiness_status)}</small><small>Case …${esc(c.case_id.slice(-6))}</small></button>`).join('')||'<p class="muted">No cases in your scope.</p>';
   } catch(e){notice(e.message)}
 }
 async function loadCase(id, quiet=false){
@@ -38,10 +47,14 @@ async function loadCase(id, quiet=false){
       api(base+'/communication-reference')
     ]);
     const [reviews,outbox,audit,findings,commitments,reminders,replies,documents]=collections;
+    const documentFindings=await Promise.all(documents.filter(d=>!['queued','processing'].includes(d.status)).map(async d=>{
+      try{return {document:d,finding:await api(base+'/documents/'+encodeURIComponent(d.document_id)+'/finding')}}
+      catch(error){return {document:d,error:error.message}}
+    }));
     const runIds=[...new Set([...audit.map(x=>x.run_id),...reviews.map(x=>x.run_id)].filter(Boolean))];
     const runs=await Promise.all(runIds.map(runId=>api(`/runs/${encodeURIComponent(runId)}`).catch(e=>({run_id:runId,load_error:e.message}))));
     if(generation!==state.generation || !state.token)return;
-    state.data={caseData,reviews,outbox,audit,findings,commitments,reminders,replies,mailbox,runs,documents,reference};
+    state.data={caseData,reviews,outbox,audit,findings,commitments,reminders,replies,mailbox,runs,documents,reference,documentFindings};
     render();loadCases();
     if(documents.some(d=>['queued','processing'].includes(d.status)) || runs.some(r=>['queued','running'].includes(r.status))) {
       scheduleCaseRefresh(id);
@@ -65,12 +78,12 @@ function renderChecklist(requirements) {
       const accepted = r.status === 'accepted';
       const attention = ['missing', 'needs_clarification'].includes(r.status);
       const labels = {accepted:'Accepted', missing:'Missing — please submit', needs_clarification:'Correction needed', received:'Received — verification pending', awaiting_review:'Received — awaiting review', waived:'Waived — submission not required'};
-      return `<div class="checklist-item ${accepted ? 'complete' : attention ? 'attention' : 'pending'}"><span class="checkmark" aria-hidden="true">${accepted ? '✓' : ''}</span><div class="checklist-content"><div class="row-head"><b>${title}</b></div><div class="checklist-status">${esc(labels[r.status] || r.status)}</div><div class="detail">${esc(r.scope.entity_id)}${r.scope.account_ref ? ' · ' + esc(r.scope.account_ref) : ''} · ${esc(r.accounting_period)}</div>${r.description ? `<div class="detail">${esc(r.description)}</div>` : ''}${r.completion_rule?.expected_item_refs?.length ? `<div class="detail">Required items: ${r.completion_rule.expected_item_refs.map(esc).join(', ')}</div>` : ''}${r.scope.coverage_start ? `<div class="detail">Coverage: ${esc(r.scope.coverage_start)} to ${esc(r.scope.coverage_end)}</div>` : ''}<div class="detail">Reviewer: ${esc(r.reviewer_status)} · Evidence: ${r.evidence_refs.length ? r.evidence_refs.map(x => esc(x.document_id || x.ref || JSON.stringify(x))).join(', ') : 'none'}</div>${evidenceDetails(r.evidence_refs)}</div></div>`;
+      return `<div class="checklist-item ${accepted ? 'complete' : attention ? 'attention' : 'pending'}"><span class="checkmark" aria-hidden="true">${accepted ? '✓' : ''}</span><div class="checklist-content"><div class="row-head"><b>${title}</b></div><div class="checklist-status">${esc(labels[r.status] || r.status)}</div><div class="detail">${esc(r.scope.entity_id)}${r.scope.account_ref ? ' · ' + esc(r.scope.account_ref) : ''} · ${esc(r.accounting_period)}</div>${r.description ? `<div class="detail">${esc(r.description)}</div>` : ''}${r.completion_rule?.expected_item_refs?.length ? `<div class="detail">Required items: ${r.completion_rule.expected_item_refs.map(esc).join(', ')}</div>` : ''}${r.scope.coverage_start ? `<div class="detail">Coverage: ${esc(r.scope.coverage_start)} to ${esc(r.scope.coverage_end)}</div>` : ''}<div class="detail">Reviewer: ${esc(r.reviewer_status)} · Evidence: ${r.evidence_refs.length ? r.evidence_refs.map(x => esc(x.document_id || x.ref || JSON.stringify(x))).join(', ') : 'none'}</div>${evidenceDetails(r.evidence_refs)}${renderRequirementFindings(r.requirement_id)}</div></div>`;
     }).join('');
   }).join('');
 }
 function render(){const {caseData:c,reviews,outbox,audit,findings,commitments,reminders,replies,mailbox,runs}=state.data;
- $('workspace').innerHTML=`<div class="top"><div><h1>${esc(c.client_id)} · ${esc(c.accounting_period)}</h1><p class="meta">${esc(c.case_id)} · version ${c.state_version} · owner ${esc(c.owner_user_id)} · due ${when(c.due_at)}</p></div>${pill(c.readiness_status)}</div>${renderOverview()}
+ $('workspace').innerHTML=`<div class="top"><div><h1>${esc(c.client_id)} · ${esc(c.accounting_period)}</h1><p class="meta">${esc(c.case_id)} · version ${c.state_version} · owner ${esc(c.owner_user_id)} · due ${when(c.due_at)}</p></div>${pill(c.readiness_status)}</div>${demoScenario(c.case_id)?`<div class="panel"><b>Demo …${esc(c.case_id.slice(-6))} · ${esc(demoScenario(c.case_id).title)}</b><p>${esc(demoScenario(c.case_id).help)}</p><small>Scenario labels are testing guidance. The checklist and audit show current state. Version tracks state changes, not scenario numbers.</small></div>`:''}${renderOverview()}
  <div class="grid"><div class="panel"><h2>Document checklist</h2><p class="muted">A tick means the required documents have been accepted.</p>${renderChecklist(c.requirements)}</div>
  <div class="panel"><h2>Human review <span class="muted">${reviews.filter(x=>x.status==='open').length} open</span></h2>${reviews.map(t=>`<div class="row"><div class="row-head"><b>${esc(t.reason_code)}</b>${pill(t.status)}</div><div class="detail">${esc(t.reason)} · assigned ${esc(t.assigned_to)} · ${when(t.created_at)}</div>${t.draft?`<pre>Subject: ${esc(t.draft.subject)}\n\n${esc(t.draft.body)}</pre>`:''}${t.status==='open'?`<div class="actions">${t.draft?`<button data-review="approve_draft" data-id="${esc(t.review_task_id)}">Approve draft</button><button class="secondary" data-review="edit_and_approve" data-id="${esc(t.review_task_id)}">Edit & approve</button><button class="secondary" data-review="reject_draft" data-id="${esc(t.review_task_id)}">Reject</button>`:`<button class="secondary" data-review="dismiss_error" data-id="${esc(t.review_task_id)}">Dismiss error</button>`}</div>`:''}</div>`).join('')||'<p class="muted">No review tasks.</p>'}<p class="muted">Document review is available below. Follow-up pause/resume is not yet supported.</p></div>
  ${renderDocuments()}
@@ -142,6 +155,11 @@ function evidenceDetails(refs){
   if(!refs?.length)return '';
   return `<details><summary>View evidence (${refs.length})</summary>${refs.map(ref=>`<div class="detail">${esc(ref.document_id)} · page ${esc(ref.page)}<blockquote>${esc(ref.excerpt || ref.quote || ref.text || JSON.stringify(ref))}</blockquote></div>`).join('')}</details>`;
 }
+function renderRequirementFindings(requirementId){
+  const rows=(state.data?.documentFindings || []).filter(x=>x.document.requirement_id===requirementId || x.finding?.requirement_id===requirementId);
+  return rows.map(x=>x.error?`<p class="detail">Assessment unavailable: ${esc(x.error)}</p>`:
+    `<div class="assessment ${['needs_correction','needs_review'].includes(x.finding.result)?'attention':''}"><b>${x.finding.analysis_source==='live_llm'?'AI first review':'Automated rule review'} · ${esc(x.finding.result.replaceAll('_',' '))}</b><p class="detail">${esc(x.document.original_filename)} · Document ${esc(x.document.status.replaceAll('_',' '))}${x.finding.analysis_model?' · '+esc(x.finding.analysis_model):''}</p>${x.finding.analysis_error?'<p>AI review unavailable — human review required.</p>':''}${[...x.finding.issues,...x.finding.uncertainty_reasons].map(reason=>`<p>${esc(reason)}</p>`).join('')}${evidenceDetails(x.finding.evidence_refs)}<small>Assessment retained for traceability; current checklist status reflects the latest decision.</small></div>`).join('');
+}
 function renderOverview(){
   const {caseData:c,reviews,documents,commitments,reminders,reference}=state.data;
   const missing=c.requirements.filter(r=>!['accepted','waived'].includes(r.status));
@@ -155,14 +173,14 @@ function renderOverview(){
 function renderDocuments(){
   const {documents,caseData:c}=state.data;
   const requirementName=id=>{const r=c.requirements.find(x=>x.requirement_id===id);return r?`${r.document_type.replaceAll('_',' ')} · ${r.scope.account_ref || r.scope.entity_id}`:'Not assigned';};
-  return `<div class="panel wide"><div class="row-head"><h2>Documents & evidence</h2><button data-flow="upload">Upload PDF</button></div><p class="muted">Text-based PDF, up to 5 MiB. Scans need human review; OCR is not available.</p>${documents.map(d=>`<div class="row"><div class="row-head"><b>${esc(d.original_filename)}</b>${pill(d.status)}</div><div class="detail">${esc(requirementName(d.requirement_id))} · ${when(d.created_at)} · ${(d.size_bytes/1024).toFixed(1)} KB${d.duplicate_of_document_id?' · Duplicate upload':''}</div><div class="actions">${!['queued','processing'].includes(d.status)?`<button class="secondary" data-flow="evidence" data-document="${esc(d.document_id)}">View finding & review history</button>`:'<span class="muted">Waiting for the document worker. This page refreshes automatically.</span>'}${d.status==='needs_review'?`<button data-flow="doc-review" data-document="${esc(d.document_id)}">Review document</button>`:''}</div></div>`).join('')||'<p class="muted">No documents yet. Upload evidence for an outstanding requirement.</p>'}</div>`;
+  return `<div class="panel wide"><div class="row-head"><h2>Documents & evidence</h2><button data-flow="upload">Upload PDF</button></div><p class="muted">Text-based PDF, up to 5 MiB. Scans need human review; OCR is not available.</p>${documents.map(d=>`<div class="row"><div class="row-head"><b>${esc(d.original_filename)}</b>${pill(d.status)}</div><div class="detail">${esc(requirementName(d.requirement_id))} · ${when(d.created_at)} · ${(d.size_bytes/1024).toFixed(1)} KB${d.duplicate_of_document_id?' · Duplicate upload':''}</div><div class="actions">${!['queued','processing'].includes(d.status)?`<button class="secondary" data-flow="evidence" data-document="${esc(d.document_id)}">View finding & review history</button>`:'<span class="muted">Waiting for the document worker. This page refreshes automatically.</span>'}${d.status==='processed' && c.requirements.some(r=>r.status==='accepted' && r.evidence_refs.some(ref=>ref.document_id===d.document_id))?`<button class="secondary" data-flow="undo-document" data-document="${esc(d.document_id)}">Undo acceptance / review again</button>`:''}${d.status==='needs_review'?`<button data-flow="doc-review" data-document="${esc(d.document_id)}">Review document</button><button class="secondary" data-flow="ai-review" data-document="${esc(d.document_id)}">Run AI first review</button>`:''}</div></div>`).join('')||'<p class="muted">No documents yet. Upload evidence for an outstanding requirement.</p>'}</div>`;
 }
 function requirementsOptions(){return state.data.caseData.requirements.map(r=>({value:r.requirement_id,label:`${r.document_type.replaceAll('_',' ')} · ${r.scope.account_ref||r.scope.entity_id} · ${r.status}`}));}
 async function showEvidence(base,documentId){
   const path=base+'/documents/'+encodeURIComponent(documentId);
   const [finding,history]=await Promise.all([api(path+'/finding'),pages(path+'/review-decisions')]);
   const d=document.createElement('dialog');d.setAttribute('aria-label','Document evidence');
-  d.innerHTML=`<h2>Document evidence</h2>${pill(finding.result)}<p>Detected: ${esc(finding.detected_type || 'Unknown')} · ${esc(finding.detected_period || 'Unknown period')}</p><p>Entity: ${esc(finding.entity_match)} · Account: ${esc(finding.account_match || 'Not applicable')}</p><p>Coverage: ${esc(finding.coverage_start||'—')} to ${esc(finding.coverage_end||'—')}</p><h3>Issues and uncertainty</h3><p>${[...finding.issues,...finding.uncertainty_reasons].map(esc).join('<br>')||'None reported.'}</p>${evidenceDetails(finding.evidence_refs)}<h3>Review history</h3>${history.map(h=>`<p>${esc(h.decision)} · ${esc(h.reviewer_user_id)} · ${when(h.decided_at)}<br>${esc(h.reason)}</p>`).join('')||'<p>No human decision recorded.</p>'}<form method="dialog"><button>Close</button></form>`;
+  d.innerHTML=`<h2>Document evidence</h2>${pill(finding.result)}<p>${finding.analysis_source==='live_llm'?'AI first review':'Automated rule review'}${finding.analysis_model?' · '+esc(finding.analysis_model):''}${finding.analysis_error?' · AI review unavailable; human review required':''}</p><p>Detected: ${esc(finding.detected_type || 'Unknown')} · ${esc(finding.detected_period || 'Unknown period')}</p><p>Entity: ${esc(finding.entity_match)} · Account: ${esc(finding.account_match || 'Not applicable')}</p><p>Coverage: ${esc(finding.coverage_start||'—')} to ${esc(finding.coverage_end||'—')}</p><h3>Issues and uncertainty</h3><p>${[...finding.issues,...finding.uncertainty_reasons].map(esc).join('<br>')||'None reported.'}</p>${evidenceDetails(finding.evidence_refs)}<h3>Review history</h3>${history.slice().sort((a,b)=>a.decided_at.localeCompare(b.decided_at)).map(h=>`<p>${esc(h.decision)} · ${esc(h.reviewer_user_id)} · ${when(h.decided_at)}<br>${esc(h.reason)}</p>`).join('')||'<p>No human decision recorded.</p>'}<form method="dialog"><button>Close</button></form>`;
   document.body.append(d);d.addEventListener('close',()=>d.remove(),{once:true});d.showModal();
 }
 document.addEventListener('click',async event=>{
@@ -182,6 +200,22 @@ document.addEventListener('click',async event=>{
         const body=new FormData();body.set('file',values.file,values.file.name);body.set('expected_state_version',version);
         if(values.requirement)body.set('requirement_id',values.requirement);
         await mutation(base+'/documents',body);break;
+      }
+      case 'ai-review': {
+        const doc=state.data.documents.find(d=>d.document_id===button.dataset.document);
+        const values=await promptFields('Run AI first review',[
+          {name:'target',label:'Requirement to assess',options:requirementsOptions(),value:doc.requirement_id},
+          {name:'reason',label:'Reason for reanalysis (uses the configured document worker and may incur model cost)',multiline:true}]);
+        if(values)await mutation(base+'/documents/'+encodeURIComponent(doc.document_id)+'/review-decisions',{
+          expected_state_version:version,decision:'reassign_for_processing',target_requirement_id:values.target,reason:values.reason});
+        break;
+      }
+      case 'undo-document': {
+        const values=await promptFields('Undo document acceptance',[
+          {name:'reason',label:'Reason for reopening. Linked requirements will need review again and the case will return to collecting. Original review history is preserved.',multiline:true}]);
+        if(values)await mutation(base+'/documents/'+encodeURIComponent(button.dataset.document)+'/review-decisions',{
+          expected_state_version:version,decision:'reopen_review',target_requirement_id:null,reason:values.reason});
+        break;
       }
       case 'doc-review': {
         await showEvidence(base,button.dataset.document);

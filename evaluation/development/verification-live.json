@@ -1,0 +1,162 @@
+{
+  "scope": "Development component integration checks; not full E2E or business metrics",
+  "live": true,
+  "model": "deepseek-flash",
+  "results": [
+    {
+      "scenario_id": "dev_001",
+      "mode": "live_llm",
+      "status": "BLOCKED_AI",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_review",
+          "issues": [],
+          "uncertainty_reasons": [
+            "AI review could not be verified. Human review is required."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": "AI_REVIEW_UNAVAILABLE"
+        }
+      ],
+      "elapsed_seconds": 2.786
+    },
+    {
+      "scenario_id": "dev_002",
+      "mode": "live_llm",
+      "status": "BLOCKED_AI",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_review",
+          "issues": [
+            "Document covers 2026-06-01 to 2026-06-30; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [
+            "AI review could not be verified. Human review is required."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": "AI_REVIEW_UNAVAILABLE"
+        }
+      ],
+      "elapsed_seconds": 1.864
+    },
+    {
+      "scenario_id": "dev_003",
+      "mode": "live_llm",
+      "status": "BLOCKED_AI",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_review",
+          "issues": [
+            "Document covers 2026-07-01 to 2026-07-15; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [
+            "AI review could not be verified. Human review is required."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": "AI_REVIEW_UNAVAILABLE"
+        }
+      ],
+      "elapsed_seconds": 2.084
+    },
+    {
+      "scenario_id": "dev_004",
+      "mode": "live_llm",
+      "status": "BLOCKED_AI",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_review",
+          "issues": [
+            "Document covers 2026-07-01 to 2026-07-15; 2026-07-01 to 2026-07-31 is required."
+          ],
+          "uncertainty_reasons": [
+            "AI review could not be verified. Human review is required."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": "AI_REVIEW_UNAVAILABLE"
+        },
+        {
+          "result": "needs_review",
+          "issues": [
+            "Duplicate document must not create duplicate satisfaction."
+          ],
+          "uncertainty_reasons": [
+            "Exact duplicate file hash detected.",
+            "AI review could not be verified. Human review is required."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": "AI_REVIEW_UNAVAILABLE"
+        }
+      ],
+      "elapsed_seconds": 4.294
+    },
+    {
+      "scenario_id": "dev_005",
+      "mode": "live_llm",
+      "status": "PASS",
+      "assessment": {
+        "finding": {
+          "intent": "submission_commitment",
+          "requirement_ids": [
+            "req_4a39e12233a840b1808bc659c31c6a40"
+          ],
+          "promised_at": null,
+          "needs_clarification": true,
+          "uncertainty_reasons": [
+            "Reply says 'next week' without specifying a day; received_at is 2026-08-10, so the exact promised date is ambiguous (any time in the week of 2026-08-17)."
+          ],
+          "evidence_excerpt": "I will submit the missing bank statement next week.",
+          "finding_id": "finding_2decebf824eb461b99337eac08c0f3a4",
+          "responsibility": "reply_assessment",
+          "case_id": "case_da249a17e78c400fbc834c10856b5afc",
+          "input_state_version": 2,
+          "reply_id": "reply_e410264995c946dd8e0ba8130002d81f"
+        },
+        "commitment": null,
+        "reminder": null,
+        "review_task_id": "review_2e90f4075354454c82acafad78e9959a"
+      },
+      "scope": "Trusted sandbox reply analysis only; outbound round trip and browser not tested.",
+      "elapsed_seconds": 2.306
+    },
+    {
+      "scenario_id": "dev_006",
+      "mode": "live_llm",
+      "status": "PASS",
+      "actual_outstanding": [
+        "bank_statement"
+      ],
+      "readiness": "collecting",
+      "findings": [
+        {
+          "result": "needs_correction",
+          "issues": [
+            "Detected document type invoice; bank_statement is required."
+          ],
+          "uncertainty_reasons": [
+            "The candidate requirement specified a bank_statement document type, but the supplied page is an invoice, so it does not satisfy that requirement type.",
+            "No supplier name is stated on the page; the only party identifier is an internal entity ID."
+          ],
+          "analysis_source": "live_llm",
+          "analysis_error": null
+        }
+      ],
+      "elapsed_seconds": 1.777
+    }
+  ]
+}

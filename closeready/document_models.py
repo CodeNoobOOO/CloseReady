@@ -44,6 +44,7 @@ DocumentReviewDecision = Literal[
     "accept_for_requirement",
     "reject_document",
     "reassign_for_processing",
+    "reopen_review",
 ]
 
 
@@ -97,9 +98,9 @@ class DocumentReviewDecisionRequest(ContractModel):
 
     @model_validator(mode="after")
     def decision_has_required_target(self):
-        if self.decision == "reject_document" and self.target_requirement_id is not None:
-            raise ValueError("Rejected documents cannot target a requirement")
-        if self.decision != "reject_document" and self.target_requirement_id is None:
+        if self.decision in ("reject_document", "reopen_review") and self.target_requirement_id is not None:
+            raise ValueError("Reject/reopen decisions cannot target a requirement")
+        if self.decision not in ("reject_document", "reopen_review") and self.target_requirement_id is None:
             raise ValueError("This decision requires a target requirement")
         return self
 
@@ -150,6 +151,9 @@ class DocumentExtraction(ContractModel):
 
 
 class DocumentFinding(ContractModel):
+    analysis_source: Literal["rules", "live_llm"] = "rules"
+    analysis_model: str | None = None
+    analysis_error: str | None = None
     finding_id: Text
     responsibility: Literal["document_assessment"]
     case_id: Text

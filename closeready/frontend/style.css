@@ -7,3 +7,7 @@
 .checklist-item.complete{background:#f0faf3;border-color:#b6ddc5}.complete .checkmark{background:#1a755a;color:white;border-color:#1a755a}.complete .checklist-status{color:#176140}
 .checklist-item.pending .checklist-status{color:#855a14}.checklist-item.unconfigured{border-style:dashed;color:#60756b;background:#f8faf8}
 select{font:inherit;border:1px solid #b9c9c1;border-radius:8px;padding:10px;background:white;color:#18302c;width:100%}dialog input{max-width:100%;width:100%}dialog{max-height:85vh;overflow:auto}details{margin-top:10px;font-size:13px}summary{cursor:pointer;color:#1a755a}blockquote{border-left:3px solid #b9c9c1;padding-left:10px;margin-left:0;white-space:pre-wrap;overflow-wrap:anywhere}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}.summary-grid strong{display:block;font-size:26px}.summary-grid .date{font-size:17px}.overview{border-left:4px solid #1a755a}.checklist-content{width:100%}@media(max-width:760px){.summary-grid{grid-template-columns:1fr}.row-head{flex-wrap:wrap}}
+
+.case .scenario-label{color:#176b55;font-weight:700;margin:6px 0;line-height:1.5}
+
+.assessment{margin-top:12px;padding:12px;border-left:4px solid #557e72;background:#f3f7f5}.assessment.attention{border-color:#b42318;background:#fff1ef;color:#86251b}.assessment p{margin:8px 0}

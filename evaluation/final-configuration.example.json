@@ -1,0 +1,14 @@
+{
+  "status": "NOT_SELECTED",
+  "selected_commit": null,
+  "run_mode": null,
+  "provider": null,
+  "model": null,
+  "prompt_and_rules_commit": null,
+  "tool_configuration": null,
+  "price_basis": null,
+  "selected_using": "development_only",
+  "held_out_previously_executed": false,
+  "selection_reason": null,
+  "frozen_at": null
+}
