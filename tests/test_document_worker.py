@@ -16,6 +16,7 @@ from closeready.document_models import DocumentExtraction, DocumentFinding, Extr
 from closeready.document_processor import (
     DocumentProcessor,
     build_document_analysis_request,
+    validate_analysis_evidence,
 )
 from closeready.document_store import DocumentStore, document_jobs
 from closeready.runtime_store import RuntimeStore
@@ -24,6 +25,7 @@ from closeready.worker import AgentWorker
 from test_case_api import access_config, case_request
 from closeready.llm_document_analyzer import (
     LLMDocumentAnalysis,
+    LLMDocumentEvidence,
     ScriptedDocumentAnalyzer,
 )
 
@@ -508,6 +510,168 @@ class DocumentWorkerTests(unittest.TestCase):
             "account_ref",
             candidate.model_dump(),
         )
+
+    
+    def test_analysis_evidence_matches_real_page(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=1,
+                    excerpt="Account ending in 1234",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_rejects_invalid_page(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=999,
+                    excerpt="Account ending in 1234",
+                )
+            ]
+        )
+
+        self.assertFalse(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_rejects_invented_excerpt(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=1,
+                    excerpt="Account ending in 9999",
+                )
+            ]
+        )
+
+        self.assertFalse(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_processor_invalid_llm_evidence_needs_review(self):
+        llm_case = self.create_llm_case()
+        requirement = llm_case.requirements[0]
+
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=requirement.requirement_id,
+            expected_state_version=llm_case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-invalid-evidence",
+            key="llm-invalid-evidence",
+        )
+
+        token = self.documents.claim(job.job_id)
+
+        self.assertIsNotNone(token)
+        assert token is not None
+
+        analyzer = ScriptedDocumentAnalyzer(
+            LLMDocumentAnalysis(
+                detected_type="bank_statement",
+                entity_name="entity_demo",
+                account_identifier="Account ending in 1234",
+                detected_period="2026-07",
+                coverage_start=datetime(2026, 7, 1).date(),
+                coverage_end=datetime(2026, 7, 31).date(),
+                evidence=[
+                    LLMDocumentEvidence(
+                        field="account_identifier",
+                        page=999,
+                        excerpt="This evidence does not exist",
+                    )
+                ],
+            )
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\n"
+                    "Entity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: "
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(
+            job.job_id,
+            token,
+        )
+
+        self.assertEqual(
+            result.status,
+            "needs_review",
+        )
+
+        finding = self.documents.get_finding(
+            self.actor,
+            llm_case.case_id,
+            job.document_id,
+        )
+
+        self.assertIsNotNone(finding)
+        assert finding is not None
+
+        self.assertEqual(
+            finding.result,
+            "needs_review",
+        )
+
+        self.assertTrue(
+            any(
+                "evidence" in reason.lower()
+                for reason in finding.uncertainty_reasons
+            )
+        )
+
+        unchanged = self.store.get_case(
+            self.actor,
+            llm_case.case_id,
+        )
+
+        self.assertEqual(
+            unchanged.requirements[0].status,
+            "missing",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

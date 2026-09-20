@@ -1,5 +1,7 @@
 """Pure document functions coordinated through durable application state."""
+
 from collections.abc import Callable
+
 
 from .document_assessment import (
     assess_document,
@@ -12,7 +14,39 @@ from closeready.llm_document_analyzer import (
     CandidateRequirement,
     DocumentAnalysisRequest,
     DocumentAnalyzer,
+    LLMDocumentAnalysis,
 )
+
+
+def validate_analysis_evidence(
+    extraction: DocumentExtraction,
+    analysis: LLMDocumentAnalysis,
+) -> bool:
+    pages = {page.page: page.text for page in extraction.pages}
+
+    for evidence in analysis.evidence:
+        page_text = pages.get(evidence.page)
+
+        if page_text is None:
+            return False
+
+        if evidence.excerpt not in page_text:
+            return False
+
+    return True
+
+
+def mark_invalid_evidence(
+    analysis: LLMDocumentAnalysis,
+) -> LLMDocumentAnalysis:
+    return analysis.model_copy(
+        update={
+            "uncertainty_reasons": [
+                *analysis.uncertainty_reasons,
+                "Model evidence could not be verified against extracted PDF text.",
+            ]
+        }
+    )
 
 
 def build_document_analysis_request(
@@ -85,10 +119,7 @@ class DocumentProcessor:
                     document_id=context.document.document_id,
                     extraction=extraction,
                     requirement_id=context.document.requirement_id,
-                    duplicate=(
-                        context.document.duplicate_of_document_id
-                        is not None
-                    ),
+                    duplicate=(context.document.duplicate_of_document_id is not None),
                 )
             else:
                 request = build_document_analysis_request(
@@ -98,6 +129,14 @@ class DocumentProcessor:
                 )
 
                 analysis = self.analyzer.analyze(request)
+
+                if not validate_analysis_evidence(
+                    extraction,
+                    analysis,
+                ):
+                    analysis = mark_invalid_evidence(
+                        analysis,
+                    )
 
                 finding = assess_llm_analysis(
                     case=context.case,
@@ -123,5 +162,3 @@ class DocumentProcessor:
             extraction,
             finding,
         )
-        
-        
