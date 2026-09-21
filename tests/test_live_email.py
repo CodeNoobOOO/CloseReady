@@ -248,6 +248,8 @@ class LiveCommunicationStoreTests(unittest.TestCase):
             timed.deliver_outbox(self.actor, self.case.case_id, queued.outbox_id,
                 DeliverOutboxRequest(), 'timeout-live-2')
         self.assertEqual(raised.exception.code, 'ALREADY_DELIVERED')
+        tasks = timed.runtime.review_tasks(self.actor, self.case.case_id).items
+        self.assertTrue(any(task.reason_code == 'DELIVERY_UNKNOWN' for task in tasks))
 
     def test_failed_send_is_recorded(self):
         queued = self.approve_draft()
@@ -256,6 +258,8 @@ class LiveCommunicationStoreTests(unittest.TestCase):
             DeliverOutboxRequest(), 'fail-live')
         self.assertEqual(result.delivery_status, 'failed')
         self.assertIsNone(result.provider_message_id)
+        tasks = failing.runtime.review_tasks(self.actor, self.case.case_id).items
+        self.assertTrue(any(task.reason_code == 'DELIVERY_FAILED' for task in tasks))
 
     def test_inbound_uses_visible_reference_not_sender_alone(self):
         associated = self.db.process_inbound(inbound(

@@ -88,7 +88,9 @@ class ReminderRecord(ContractModel):
     case_id: Text
     requirement_ids: list[Text]
     scheduled_at: Timestamp
-    status: Literal['scheduled', 'queued', 'sent', 'cancelled', 'failed', 'delivery_unknown']
+    status: Literal[
+        'scheduled', 'paused', 'queued', 'sent', 'cancelled', 'failed', 'delivery_unknown',
+    ]
     dedupe_key: Text
     contact_id: Text
     policy_version: PositiveInt

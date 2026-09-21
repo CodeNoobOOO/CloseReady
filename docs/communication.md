@@ -82,7 +82,7 @@ The access file must also contain:
 6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks outstanding items, the sending window and the customer-visible guard, attaches the Case reference, and invokes the configured backend.
 7. `GET /api/v1/cases/{case_id}/mailbox` lists the locally persisted delivery copy. `live=true` means SMTP was used; it is still not a bounce receipt.
 
-Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_status=delivery_unknown` and is not automatically retried. Other transport errors are `failed`.
+Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_status=delivery_unknown` and opens an assigned review; it is not automatically retried. Other transport errors are `failed` and also open a review.
 
 ## Reply, attachment and reminder flow
 
@@ -105,7 +105,7 @@ Non-PDF parts are ignored. Empty or oversized PDFs open a human review rather th
 
 `POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` is unchanged: the LLM may record a commitment; the application schedules a reminder after policy checks.
 
-`POST /api/v1/cases/{case_id}/reminders/dispatch-due` rechecks outstanding items, duplicate keys, interval/limit policy and the sending window, then sends due reminders through the same backend. Outcomes are `sent`, `failed` or `delivery_unknown`. Obsolete mixed-item reminders are cancelled rather than sent. When the worker is idle and mail is configured, it also polls inbound mail and dispatches due reminders.
+`POST /api/v1/cases/{case_id}/reminders/dispatch-due` rechecks outstanding items, duplicate keys, interval/limit policy, open overlapping reviews and the sending window, then sends due reminders through the same backend. After a successful send it schedules the next chase reminder under `min_reminder_interval_hours`, or opens a `REMINDER_LIMIT` review and stops when `max_reminders_per_requirement` is reached. Open dispute, waiver, clarification or limit reviews pause affected follow-up as `paused` so the worker does not keep a due reminder. Failed or unknown reminder delivery opens an assigned review and does not schedule the next chase. Outcomes are `sent`, `failed` or `delivery_unknown`. Obsolete mixed-item reminders are cancelled rather than sent. When the worker is idle and mail is configured, it also polls inbound mail and dispatches due reminders.
 
 ## Run the integrated sandbox demonstration
 

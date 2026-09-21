@@ -23,7 +23,8 @@ from .mail_messages import (
 )
 from .models import CaseSnapshot, MessageDraft, ReplyAssessment, ReplyAssessmentContent
 from .reply_assessment import assess_reply as run_reply_assessment
-from .runtime_models import OutboxRecord
+from .runtime_models import OutboxRecord, ReviewTaskRecord
+from .runtime_store import reviews
 from .store import DomainError, Store, case_communication_refs, cases, forbidden
 
 communication_metadata = MetaData()
@@ -142,6 +143,69 @@ class CommunicationStore:
         if not set(requirement_ids).issubset(known):
             raise DomainError('INVALID_TOOL', 'Requirement is not on this case.', 422)
         return [rid for rid in requirement_ids if known[rid].status not in ('accepted', 'waived')]
+
+    def _case_reminders(self, conn, case_id):
+        return [ReminderRecord.model_validate_json(row['record']) for row in
+            conn.execute(select(reminders).where(reminders.c.case_id == case_id)).mappings()]
+
+    def _attempted_reminder_count(self, conn, case_id, requirement_ids):
+        sent_count = 0
+        latest = None
+        for reminder in self._case_reminders(conn, case_id):
+            if not (set(reminder.requirement_ids) & set(requirement_ids)):
+                continue
+            if reminder.status in ('sent', 'queued', 'delivery_unknown'):
+                sent_count += 1
+                if latest is None or reminder.scheduled_at >= latest.scheduled_at:
+                    latest = reminder
+        return sent_count, latest
+
+    def _follow_up_paused(self, conn, case_id, requirement_ids):
+        wanted = set(requirement_ids)
+        for raw in conn.execute(select(reviews.c.record).where(
+                reviews.c.case_id == case_id)).scalars():
+            task = ReviewTaskRecord.model_validate_json(raw)
+            if task.status != 'open':
+                continue
+            paused = set(task.requirement_ids)
+            if paused & wanted:
+                return True
+        return False
+
+    def _escalate_reminder_limit(self, conn, actor, case, requirement_ids):
+        return self.runtime.create_policy_review(
+            conn, actor, case, 'REMINDER_LIMIT',
+            'Automatic reminders stopped after the configured limit.',
+            requirement_ids, 'reminder-limit|' + case.case_id + '|' + ','.join(sorted(requirement_ids)))
+
+    def _delivery_review(self, conn, actor, case, requirement_ids, code, source_id):
+        reasons = {
+            'REMINDER_DELIVERY_FAILED': 'Reminder delivery failed; a human must decide the next send.',
+            'REMINDER_DELIVERY_UNKNOWN': 'Reminder delivery is unknown; do not automatically resend.',
+            'DELIVERY_FAILED': 'Outbox delivery failed; a human must decide the next send.',
+            'DELIVERY_UNKNOWN': 'Outbox delivery is unknown; do not automatically resend.',
+        }
+        return self.runtime.create_policy_review(
+            conn, actor, case, code, reasons[code], requirement_ids, code + '|' + source_id)
+
+    def _save_reminder(self, conn, reminder):
+        conn.execute(update(reminders).where(
+            reminders.c.reminder_id == reminder.reminder_id).values(
+                record=reminder.model_dump_json()))
+
+    def _pending_reminder(self, conn, case_id, requirement_ids, contact_id):
+        wanted = set(requirement_ids)
+        for reminder in self._case_reminders(conn, case_id):
+            if reminder.status not in ('scheduled', 'paused'):
+                continue
+            if reminder.contact_id == contact_id and set(reminder.requirement_ids) == wanted:
+                return reminder
+        return None
+
+    @staticmethod
+    def _reminder_dedupe_key(case_id, requirement_ids, contact_id, scheduled_at):
+        slot = scheduled_at.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        return '|'.join([case_id, ','.join(sorted(requirement_ids)), contact_id, slot])
 
     def _bump(self, conn, actor, case, reason, action, outcome='executed'):
         changed = CaseSnapshot.model_validate({**case.model_dump(mode='json'),
@@ -334,6 +398,12 @@ class CommunicationStore:
                 record=message.model_dump_json()))
             self._remember_thread(conn, provider_id, case.case_id, reference.public_reference,
                 contact.contact_id, 'outbox', queued.outbox_id)
+        elif status == 'failed':
+            self._delivery_review(
+                conn, actor, case, queued.requirement_ids, 'DELIVERY_FAILED', queued.outbox_id)
+        elif status == 'delivery_unknown':
+            self._delivery_review(
+                conn, actor, case, queued.requirement_ids, 'DELIVERY_UNKNOWN', queued.outbox_id)
         self.store._audit(conn, actor, 'deliver_outbox',
             'queued' if status == 'sent' else status, status, case)
         return DeliveryResult(outbox_id=queued.outbox_id, delivery_status=status,
@@ -483,6 +553,7 @@ class CommunicationStore:
             raise DomainError('INVALID_TOOL', 'Commitment must refer to an outstanding requirement.', 422)
         created = None
         reminder = None
+        created_by_requirement = {}
         previous = [CommitmentRecord.model_validate_json(row['record']) for row in
             conn.execute(select(commitments).where(commitments.c.case_id == case.case_id)).mappings()]
         for requirement_id in outstanding:
@@ -500,16 +571,21 @@ class CommunicationStore:
             conn.execute(insert(commitments).values(commitment_id=record.commitment_id,
                 case_id=case.case_id, record=record.model_dump_json()))
             created = record
+            created_by_requirement[requirement_id] = record
             self._cancel_scheduled(conn, actor, case, [requirement_id], 'commitment_reschedule')
-            reminder = self._schedule_follow_up(conn, actor, case, [requirement_id], record, policy)
         case = self._bump(conn, actor, case, 'record_commitment', 'record_commitment')
+        for requirement_id in outstanding:
+            reminder = self._schedule_follow_up(
+                conn, actor, case, [requirement_id], policy,
+                commitment=created_by_requirement[requirement_id])
+            case = self.store._case(conn, actor, case.case_id)
         return created, reminder, case
 
     def _cancel_scheduled(self, conn, actor, case, requirement_ids, reason):
         rows = conn.execute(select(reminders).where(reminders.c.case_id == case.case_id)).mappings().all()
         for row in rows:
             reminder = ReminderRecord.model_validate_json(row['record'])
-            if reminder.status != 'scheduled':
+            if reminder.status not in ('scheduled', 'paused'):
                 continue
             if set(reminder.requirement_ids) & set(requirement_ids):
                 cancelled = ReminderRecord.model_validate({**reminder.model_dump(mode='json'),
@@ -525,43 +601,49 @@ class CommunicationStore:
         self._cancel_scheduled(
             conn, actor, case, requirement_ids, 'requirement_resolved')
 
-    def _schedule_follow_up(self, conn, actor, case, requirement_ids, commitment, policy):
-        contact = self._resolve_contact(case)
-        sent_count = 0
-        latest_sent = None
-        for row in conn.execute(select(reminders).where(
-                reminders.c.case_id == case.case_id)).mappings():
-            reminder = ReminderRecord.model_validate_json(row['record'])
-            overlapping = set(reminder.requirement_ids) & set(requirement_ids)
-            if overlapping and reminder.status in ('sent', 'queued', 'delivery_unknown'):
-                sent_count += 1
-                latest_sent = reminder
-        if sent_count >= policy.max_reminders_per_requirement:
-            self.runtime.create_policy_review(conn, actor, case, 'REMINDER_LIMIT',
-                'Automatic reminders stopped after the configured limit.',
-                requirement_ids, 'reminder-limit|' + commitment.commitment_id)
+    def _schedule_follow_up(self, conn, actor, case, requirement_ids, policy, commitment=None):
+        outstanding = self._outstanding(case, requirement_ids)
+        if not outstanding:
             return None
-        scheduled_at = commitment.promised_at + timedelta(hours=policy.commitment_grace_hours)
+        if self._follow_up_paused(conn, case.case_id, outstanding):
+            return None
+        contact = self._resolve_contact(case)
+        pending = self._pending_reminder(conn, case.case_id, outstanding, contact.contact_id)
+        if pending is not None:
+            return pending
+        sent_count, latest_sent = self._attempted_reminder_count(conn, case.case_id, outstanding)
+        if sent_count >= policy.max_reminders_per_requirement:
+            self._escalate_reminder_limit(conn, actor, case, outstanding)
+            return None
+        if commitment is not None:
+            scheduled_at = commitment.promised_at + timedelta(hours=policy.commitment_grace_hours)
+        else:
+            scheduled_at = utcnow() + timedelta(hours=policy.min_reminder_interval_hours)
         if latest_sent is not None:
             min_next = latest_sent.scheduled_at + timedelta(hours=policy.min_reminder_interval_hours)
             if scheduled_at < min_next:
                 scheduled_at = min_next
         if not self._in_window(policy, scheduled_at):
             scheduled_at = self._next_window(policy, scheduled_at)
-        draft = self._reminder_draft(case, requirement_ids)
+        draft = self._reminder_draft(case, outstanding)
         validate_customer_visible_draft(draft)
-        day = scheduled_at.astimezone(timezone.utc).date().isoformat()
-        dedupe_key = '|'.join([case.case_id, ','.join(sorted(requirement_ids)), day, contact.contact_id])
+        dedupe_key = self._reminder_dedupe_key(
+            case.case_id, outstanding, contact.contact_id, scheduled_at)
         existing = conn.execute(select(reminders.c.record).where(
             reminders.c.case_id == case.case_id, reminders.c.dedupe_key == dedupe_key)).scalar_one_or_none()
         if existing:
             current = ReminderRecord.model_validate_json(existing)
             if current.status != 'cancelled':
                 return current
+        source_id = None
+        if commitment is not None:
+            source_id = commitment.commitment_id
+        elif latest_sent is not None:
+            source_id = latest_sent.source_commitment_id
         reminder = ReminderRecord(reminder_id='reminder_' + uuid4().hex, case_id=case.case_id,
-            requirement_ids=list(requirement_ids), scheduled_at=scheduled_at, status='scheduled',
+            requirement_ids=list(outstanding), scheduled_at=scheduled_at, status='scheduled',
             dedupe_key=dedupe_key, contact_id=contact.contact_id, policy_version=policy.version,
-            source_commitment_id=commitment.commitment_id, attempt_count=0,
+            source_commitment_id=source_id, attempt_count=0,
             subject=draft.subject, body=draft.body)
         if existing:
             conn.execute(update(reminders).where(
@@ -570,7 +652,9 @@ class CommunicationStore:
         else:
             conn.execute(insert(reminders).values(reminder_id=reminder.reminder_id, case_id=case.case_id,
                 dedupe_key=dedupe_key, record=reminder.model_dump_json()))
-        self.store._audit(conn, actor, 'schedule_reminder', 'queued', 'Follow-up scheduled from commitment.', case)
+        reason = 'Follow-up scheduled from commitment.' if commitment is not None else (
+            'Next automatic reminder scheduled under policy.')
+        self.store._audit(conn, actor, 'schedule_reminder', 'queued', reason, case)
         return reminder
 
     def _reminder_draft(self, case, requirement_ids):
@@ -611,24 +695,52 @@ class CommunicationStore:
                 for row in conn.execute(select(reminders).where(
                         reminders.c.case_id == case_id)).mappings():
                     reminder = ReminderRecord.model_validate_json(row['record'])
+                    if reminder.status == 'paused':
+                        if self._follow_up_paused(conn, case_id, reminder.requirement_ids):
+                            continue
+                        scheduled_at = now if self._in_window(policy, now) else self._next_window(policy, now)
+                        reminder = ReminderRecord.model_validate({
+                            **reminder.model_dump(mode='json'),
+                            'status': 'scheduled', 'scheduled_at': scheduled_at,
+                        })
+                        self._save_reminder(conn, reminder)
+                        self.store._audit(conn, actor, 'resume_reminder', 'queued',
+                            'follow_up_resumed', case)
                     if reminder.status != 'scheduled' or reminder.scheduled_at > now:
                         continue
                     outstanding = self._outstanding(case, reminder.requirement_ids)
                     if set(outstanding) != set(reminder.requirement_ids):
                         cancelled = ReminderRecord.model_validate({**reminder.model_dump(mode='json'),
                             'status': 'cancelled'})
-                        conn.execute(update(reminders).where(
-                            reminders.c.reminder_id == reminder.reminder_id).values(
-                                record=cancelled.model_dump_json()))
+                        self._save_reminder(conn, cancelled)
                         self.store._audit(conn, actor, 'cancel_reminder', 'executed', 'obsolete_items', case)
+                        dispatched.append(cancelled)
+                        continue
+                    if self._follow_up_paused(conn, case_id, reminder.requirement_ids):
+                        paused = ReminderRecord.model_validate({**reminder.model_dump(mode='json'),
+                            'status': 'paused'})
+                        self._save_reminder(conn, paused)
+                        self.store._audit(conn, actor, 'dispatch_reminder', 'blocked',
+                            'follow_up_paused', case)
+                        dispatched.append(paused)
+                        continue
+                    sent_count, _latest = self._attempted_reminder_count(
+                        conn, case_id, reminder.requirement_ids)
+                    if sent_count >= policy.max_reminders_per_requirement:
+                        cancelled = ReminderRecord.model_validate({**reminder.model_dump(mode='json'),
+                            'status': 'cancelled'})
+                        self._save_reminder(conn, cancelled)
+                        self._escalate_reminder_limit(
+                            conn, actor, case, reminder.requirement_ids)
+                        case = self.store._case(conn, actor, case_id)
+                        self.store._audit(conn, actor, 'cancel_reminder', 'executed',
+                            'REMINDER_LIMIT', case)
                         dispatched.append(cancelled)
                         continue
                     if not self._in_window(policy):
                         delayed = ReminderRecord.model_validate({**reminder.model_dump(mode='json'),
                             'scheduled_at': self._next_window(policy)})
-                        conn.execute(update(reminders).where(
-                            reminders.c.reminder_id == reminder.reminder_id).values(
-                                record=delayed.model_dump_json()))
+                        self._save_reminder(conn, delayed)
                         dispatched.append(delayed)
                         continue
                     contact = self._resolve_contact(case, reminder.contact_id)
@@ -653,9 +765,7 @@ class CommunicationStore:
                         provider_id, status = None, 'failed'
                     finished = ReminderRecord.model_validate({**queued.model_dump(mode='json'),
                         'status': status, 'provider_message_id': provider_id})
-                    conn.execute(update(reminders).where(
-                        reminders.c.reminder_id == reminder.reminder_id).values(
-                            record=finished.model_dump_json()))
+                    self._save_reminder(conn, finished)
                     backend, live = self._mailbox_fields()
                     if status == 'sent':
                         message = MailboxMessage(message_id=provider_id, case_id=case_id,
@@ -666,6 +776,20 @@ class CommunicationStore:
                             case_id=case_id, record=message.model_dump_json()))
                         self._remember_thread(conn, provider_id, case_id, reference.public_reference,
                             contact.contact_id, 'reminder', reminder.reminder_id)
+                        case = self.store._case(conn, actor, case_id)
+                        self._schedule_follow_up(
+                            conn, actor, case, reminder.requirement_ids, policy)
+                        case = self.store._case(conn, actor, case_id)
+                    elif status == 'failed':
+                        self._delivery_review(
+                            conn, actor, case, reminder.requirement_ids,
+                            'REMINDER_DELIVERY_FAILED', reminder.reminder_id)
+                        case = self.store._case(conn, actor, case_id)
+                    elif status == 'delivery_unknown':
+                        self._delivery_review(
+                            conn, actor, case, reminder.requirement_ids,
+                            'REMINDER_DELIVERY_UNKNOWN', reminder.reminder_id)
+                        case = self.store._case(conn, actor, case_id)
                     self.store._audit(conn, actor, 'dispatch_reminder',
                         'queued' if status == 'sent' else status, status, case)
                     dispatched.append(finished)
@@ -870,11 +994,15 @@ class CommunicationStore:
         now = utcnow()
         with self.store.engine.connect() as conn:
             rows = conn.execute(select(reminders)).mappings().all()
-        due_cases = []
-        for row in rows:
-            reminder = ReminderRecord.model_validate_json(row['record'])
-            if reminder.status == 'scheduled' and reminder.scheduled_at <= now:
-                if reminder.case_id not in due_cases:
+            due_cases = []
+            for row in rows:
+                reminder = ReminderRecord.model_validate_json(row['record'])
+                if reminder.case_id in due_cases:
+                    continue
+                if reminder.status == 'scheduled' and reminder.scheduled_at <= now:
+                    due_cases.append(reminder.case_id)
+                elif reminder.status == 'paused' and not self._follow_up_paused(
+                        conn, reminder.case_id, reminder.requirement_ids):
                     due_cases.append(reminder.case_id)
         dispatched = []
         for case_id in due_cases:

@@ -36,7 +36,7 @@ Status: core models, case API, durable text-PDF ingestion, deterministic documen
 - `POST /api/v1/cases/{case_id}/replies` is authenticated trusted ingest. The sender must match an active approved contact for that client. Unknown senders are quarantined with an assigned `UNKNOWN_SENDER` review and are omitted from `GET .../replies`. There is no unauthenticated inbound-mail route.
 - `POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` runs the reply-assessment tool loop (`get_reply_evidence`, `submit_reply_assessment`) on the process LLM provider. Application code persists `ReplyAssessment`, may record a `Commitment` and schedule a reminder, or opens a policy review. It never accepts, waives or confirms readiness. Scripted tests use `scripted_test` with `live=false`.
 - `GET .../findings` currently lists reply assessments only. Document findings remain a Student 2 increment.
-- `GET .../commitments` and `GET .../reminders` are implemented. `POST .../reminders/dispatch-due` sends due sandbox reminders after rechecking outstanding items, duplicate keys, interval/limit policy and the sending window. Obsolete mixed-item reminders are cancelled rather than sent.
+- `GET .../commitments` and `GET .../reminders` are implemented. `POST .../reminders/dispatch-due` sends due reminders after rechecking outstanding items, duplicate keys, interval/limit policy, open overlapping reviews and the sending window. A successful send schedules the next chase reminder or opens `REMINDER_LIMIT` review when the configured maximum is reached. Duplicate prevention uses the scheduled UTC minute, not the calendar day, so an interval below 24 hours can produce more than one same-day reminder. Open overlapping reviews pause a due reminder instead of leaving it due. Failed or `delivery_unknown` sends open an assigned review and are not resent automatically. Obsolete mixed-item reminders are cancelled rather than sent.
 - The Student 1 analysis loop still stores request drafts as unsent review tasks with `MAIL_NOT_CONFIGURED`. Approval still creates `delivery_status=not_attempted`. Student 3 extends delivery through the deliver route rather than a model send tool.
 
 ## v0.8 deployment foundation increment
@@ -216,7 +216,7 @@ Run fields: run_id, event_id, case_id, run_mode, start_state_version, status, st
 
 run_mode: single or multi; fixed for a run. Run status: queued, running, completed, needs_review, failed, stale. Waiting for a client ends the run and schedules a future event.
 
-Reminder status: scheduled, queued, sent, cancelled, failed, delivery_unknown. Track requirement IDs, scheduled time and dedupe key. Recheck outstanding items, reviewer pauses, commitments, recipients and delivery history before sending.
+Reminder status: scheduled, paused, queued, sent, cancelled, failed, delivery_unknown. Track requirement IDs, scheduled time and dedupe key. Recheck outstanding items, reviewer pauses, commitments, recipients and delivery history before sending. An overlapping open review pauses a due reminder (`paused`) until that review is resolved; the worker must not keep it due. Failed or unknown delivery opens an assigned review and is not resent automatically.
 
 Use persisted outbox actions with unique dedupe keys. An email timeout may mean delivery succeeded: mark delivery_unknown and reconcile with the provider or a human before resending. Do not claim exactly-once delivery without provider support.
 
