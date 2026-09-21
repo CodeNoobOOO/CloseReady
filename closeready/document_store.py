@@ -79,9 +79,10 @@ document_analysis_telemetry = Table(
     "document_analysis_telemetry",
     document_metadata,
     Column("telemetry_id", String, primary_key=True),
-    Column("job_id", String, ForeignKey("document_jobs.job_id"), nullable=False, unique=True),
+    Column("job_id", String, ForeignKey("document_jobs.job_id"), nullable=False, index=True),
     Column("document_id", String, ForeignKey("documents.document_id"), nullable=False, index=True),
     Column("case_id", String, nullable=False, index=True),
+    Column("attempt_number", Integer, nullable=False),
     Column("record", SQLText, nullable=False),
 )
 document_upload_responses = Table(
@@ -846,19 +847,31 @@ class DocumentStore:
                 job_id=job_id,
                 document_id=row["document_id"],
                 case_id=row["case_id"],
+                attempt_number=DocumentJobRecord.model_validate_json(row["record"]).attempt_count,
                 record=json.dumps(record),
             ))
 
-    def get_analysis_telemetry(self, actor: Principal, case_id: str, job_id: str) -> dict:
+    def get_analysis_telemetry(
+        self, actor: Principal, case_id: str, job_id: str
+    ) -> list[dict]:
         with self.store.engine.connect() as conn:
             self.store._case(conn, actor, case_id)
-            raw = conn.execute(select(document_analysis_telemetry.c.record).where(
+            rows = conn.execute(select(
+                document_analysis_telemetry.c.attempt_number,
+                document_analysis_telemetry.c.record,
+            ).where(
                 document_analysis_telemetry.c.case_id == case_id,
                 document_analysis_telemetry.c.job_id == job_id,
-            )).scalar_one_or_none()
-        if raw is None:
+            ).order_by(
+                document_analysis_telemetry.c.attempt_number,
+                document_analysis_telemetry.c.telemetry_id,
+            )).all()
+        if not rows:
             raise DomainError("NOT_FOUND", "Document analysis telemetry not found.", 404)
-        return json.loads(raw)
+        return [
+            {"attempt_number": attempt_number, **json.loads(record)}
+            for attempt_number, record in rows
+        ]
 
     def complete(
         self,

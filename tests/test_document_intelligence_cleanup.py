@@ -7,7 +7,11 @@ from closeready.document_assessment import assess_document, assess_llm_analysis
 from closeready.document_extraction import calculate_file_hash
 from closeready.document_processor import DocumentProcessor
 from closeready.document_store import DocumentStore
-from closeready.document_models import DocumentExtraction, ExtractedPage, DocumentFinding
+from closeready.document_models import (
+    DocumentExtraction,
+    DocumentReviewDecisionRequest,
+    ExtractedPage,
+)
 from closeready.llm import Completion, ProviderError, ToolCall
 from closeready.llm_document_analyzer import (
     LLMDocumentAnalysis,
@@ -53,6 +57,37 @@ class FailingProvider:
 
     def complete(self, messages, tools):
         raise ProviderError("NETWORK_ERROR", True)
+
+
+class ReviewAnalysisProvider:
+    provider_name = "review_test"
+    model = "review-model"
+    live = False
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools):
+        self.calls += 1
+        return Completion(
+            message={"role": "assistant", "content": None, "tool_calls": []},
+            calls=[ToolCall(
+                call_id=f"review-call-{self.calls}",
+                name="submit_document_analysis",
+                arguments=(
+                    '{"analysis":{"detected_type":"bank_statement",'
+                    '"entity_name":"entity_demo",'
+                    '"coverage_start":"2026-07-01",'
+                    '"coverage_end":"2026-07-31",'
+                    '"evidence":[{"field":"coverage_start",'
+                    '"page":1,"excerpt":"Statement Period: '
+                    '01 July 2026 to 31 July 2026"}]}}'
+                ),
+            )],
+            usage={"total_tokens": 12},
+            finish_reason="tool_calls",
+            request_id=f"review-request-{self.calls}",
+        )
 
 
 def extraction(text, file_hash="hash"):
@@ -268,8 +303,46 @@ class TestDocumentIntelligenceCleanup:
         reloaded = DocumentStore(self.store)
         success_data = reloaded.get_analysis_telemetry(self.actor, case.case_id, success_job.job_id)
         failure_data = reloaded.get_analysis_telemetry(self.actor, failed_case.case_id, failed_job.job_id)
-        assert success_data["request_id"] == "successful-request"
-        assert success_data["usage"]["total_tokens"] == 18
-        assert failure_data["error_code"] == "NETWORK_ERROR"
+        assert success_data[0]["request_id"] == "successful-request"
+        assert success_data[0]["usage"]["total_tokens"] == 18
+        assert failure_data[0]["error_code"] == "NETWORK_ERROR"
         assert "Account ending in 1234" not in str(success_data)
         assert "api_key" not in str(failure_data)
+
+    def test_requeued_document_persists_telemetry_for_each_attempt(self):
+        case = self.create_case("telemetry-requeue-case")
+        requirement = case.requirements[0]
+        job = self.upload(case, requirement.requirement_id, key="telemetry-requeue")
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extraction(
+                "DBS Bank Statement\nEntity ID: entity_demo\n"
+                "Statement Period: 01 July 2026 to 31 July 2026",
+                calculate_file_hash(content),
+            ),
+            analyzer=LiveLLMDocumentAnalyzer(ReviewAnalysisProvider()),
+        )
+
+        first = self.worker(processor).run_once()
+        assert first.status == "needs_review"
+        first_case = self.store.get_case(self.actor, case.case_id)
+        self.documents.decide_review(
+            self.actor,
+            case.case_id,
+            job.document_id,
+            DocumentReviewDecisionRequest(
+                expected_state_version=first_case.state_version,
+                decision="reassign_for_processing",
+                target_requirement_id=requirement.requirement_id,
+                reason="Retry document analysis",
+            ),
+            "reassign-telemetry",
+        )
+
+        second = self.worker(processor).run_once()
+        assert second.status == "needs_review"
+        telemetry = self.documents.get_analysis_telemetry(
+            self.actor, case.case_id, job.job_id
+        )
+        assert [item["attempt_number"] for item in telemetry] == [1, 2]
+        assert [item["error_code"] for item in telemetry] == [None, None]
