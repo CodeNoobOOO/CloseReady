@@ -663,9 +663,16 @@ def assess_llm_analysis(
     # S2 compares only the authorised masked identifier.
     expected_account = requirement.scope.masked_account_identifier
 
-    if expected_account is None:
-        account_match: MatchResult | None = None
+    if requirement.document_type == "bank_statement" and requirement.scope.account_ref is not None:
+        if expected_account is None:
+            account_match: MatchResult | None = "unknown"
+        else:
+            account_match = _llm_match_result(
+                accounts_match(expected_account, analysis.account_identifier)
+            )
     else:
+        account_match = None
+    if expected_account is not None and account_match is None:
         account_match = _llm_match_result(
             accounts_match(
                 expected_account,
@@ -883,6 +890,26 @@ def assess_llm_analysis(
                 evidence_refs=evidence_refs,
                 issues=["Expected-item matching requires human review."],
             )
+
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=["Explicit-item document matches require human review."],
+            evidence_refs=evidence_refs,
+            issues=["Expected-item matching is not automatically accepted."],
+        )
 
     # 14. Evidence gate
     #

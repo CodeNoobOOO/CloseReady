@@ -128,7 +128,16 @@ class DocumentProcessor:
                     context.document.requirement_id,
                 )
 
-                analysis = self.analyzer.analyze(request)
+                try:
+                    analysis = self.analyzer.analyze(request)
+                except Exception:
+                    telemetry = getattr(self.analyzer, "last_telemetry", None)
+                    if telemetry is not None:
+                        self.store.persist_analysis_telemetry(job_id, token, telemetry)
+                    raise
+                telemetry = getattr(self.analyzer, "last_telemetry", None)
+                if telemetry is not None:
+                    self.store.persist_analysis_telemetry(job_id, token, telemetry)
 
                 if not validate_analysis_evidence(
                     extraction,
@@ -156,9 +165,11 @@ class DocumentProcessor:
                 "DOCUMENT_PROCESSING_FAILED",
             )
 
-        return self.store.complete(
-            job_id,
-            token,
-            extraction,
-            finding,
-        )
+        try:
+            return self.store.complete(job_id, token, extraction, finding)
+        except Exception as exc:
+            return self.store.fail(
+                job_id,
+                token,
+                getattr(exc, "code", None) or "DOCUMENT_PROCESSING_FAILED",
+            )

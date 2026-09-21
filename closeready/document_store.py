@@ -75,6 +75,15 @@ document_findings = Table(
     Column("case_id", String, nullable=False, index=True),
     Column("record", SQLText, nullable=False),
 )
+document_analysis_telemetry = Table(
+    "document_analysis_telemetry",
+    document_metadata,
+    Column("telemetry_id", String, primary_key=True),
+    Column("job_id", String, ForeignKey("document_jobs.job_id"), nullable=False, unique=True),
+    Column("document_id", String, ForeignKey("documents.document_id"), nullable=False, index=True),
+    Column("case_id", String, nullable=False, index=True),
+    Column("record", SQLText, nullable=False),
+)
 document_upload_responses = Table(
     "document_upload_responses",
     document_metadata,
@@ -806,6 +815,50 @@ class DocumentStore:
 
     def mark_stale(self, job_id: str, token: str) -> DocumentJobRecord:
         return self._terminal_without_case_change(job_id, token, "stale", "STALE_STATE")
+
+    def persist_analysis_telemetry(self, job_id: str, token: str, telemetry) -> None:
+        usage = telemetry.usage
+        safe_usage = None
+        if isinstance(usage, dict):
+            safe_usage = {
+                key: value for key, value in usage.items()
+                if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            }
+        record = {
+            "provider": telemetry.provider,
+            "model": telemetry.model,
+            "prompt_schema_version": telemetry.prompt_schema_version,
+            "latency_ms": telemetry.latency_ms,
+            "usage": safe_usage or None,
+            "request_id": telemetry.request_id,
+            "error_code": telemetry.error_code,
+            "repair_count": telemetry.repair_count,
+        }
+        with self.store.write() as conn:
+            row = conn.execute(select(document_jobs).where(
+                document_jobs.c.job_id == job_id
+            )).mappings().one_or_none()
+            if row is None or row["claim_token"] != token:
+                raise DomainError("INVALID_CLAIM", "Document job claim is invalid.", 409)
+            conn.execute(insert(document_analysis_telemetry).values(
+                telemetry_id="document_telemetry_" + uuid4().hex,
+                job_id=job_id,
+                document_id=row["document_id"],
+                case_id=row["case_id"],
+                record=json.dumps(record),
+            ))
+
+    def get_analysis_telemetry(self, actor: Principal, case_id: str, job_id: str) -> dict:
+        with self.store.engine.connect() as conn:
+            self.store._case(conn, actor, case_id)
+            raw = conn.execute(select(document_analysis_telemetry.c.record).where(
+                document_analysis_telemetry.c.case_id == case_id,
+                document_analysis_telemetry.c.job_id == job_id,
+            )).scalar_one_or_none()
+        if raw is None:
+            raise DomainError("NOT_FOUND", "Document analysis telemetry not found.", 404)
+        return json.loads(raw)
 
     def complete(
         self,
