@@ -88,6 +88,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(case.state_version, 2)
         self.assertEqual(len(self.db.get_run(self.actor, result.run_id).traces), 3)
 
+    def test_rejected_document_context_is_exposed_as_untrusted_tool_data(self):
+        observed = {}
+
+        def propose_from_context(messages):
+            context = json.loads(messages[-1]['content'])
+            observed.update(context['trigger_context'])
+            return self.draft()
+
+        provider = ScriptedProvider([
+            tool('get_case_context', {}), propose_from_context, final(),
+        ])
+        queued = self.db.start(
+            self.actor, self.case.case_id, 1, 'document-correction|review-1',
+            provider.provider_name, provider.model, provider.live,
+            event_type='document_correction_requested',
+            audit_action='prepare_document_correction',
+            trigger_context={
+                'type': 'rejected_document_correction',
+                'document_filename': 'july.pdf',
+                'detected_period': '2026-07',
+                'manager_reason': 'September is required.',
+                'required_items': [{
+                    'requirement_id': self.case.requirements[0].requirement_id,
+                    'document_type': 'bank_statement',
+                    'accounting_period': '2026-09',
+                }],
+            })
+
+        result = AgentRuntime(self.db, provider).execute(self.actor, queued.run_id)
+
+        self.assertEqual(result.status, 'needs_review')
+        self.assertEqual(observed['detected_period'], '2026-07')
+        self.assertEqual(observed['manager_reason'], 'September is required.')
+        self.assertEqual(observed['required_items'][0]['accounting_period'], '2026-09')
+
     def test_same_key_replays_without_calling_provider_again(self):
         provider = ScriptedProvider([tool('get_case_context', {}), self.draft(), final()])
         runtime = AgentRuntime(self.db, provider)
@@ -95,6 +130,20 @@ class RuntimeTests(unittest.TestCase):
         second = runtime.analyse(self.actor, self.case.case_id, 1, 'same')
         self.assertEqual(first.run_id, second.run_id)
         self.assertEqual(len(provider.messages), 3)
+
+    def test_same_run_key_rejects_different_trigger_context(self):
+        self.db.start(
+            self.actor, self.case.case_id, 1, 'trigger-key',
+            'scripted_test', 'scripted_test', False,
+            trigger_context={'type': 'first'})
+
+        with self.assertRaises(DomainError) as caught:
+            self.db.start(
+                self.actor, self.case.case_id, 1, 'trigger-key',
+                'scripted_test', 'scripted_test', False,
+                trigger_context={'type': 'different'})
+
+        self.assertEqual(caught.exception.code, 'IDEMPOTENCY_CONFLICT')
 
     def test_cross_case_reference_cannot_create_a_draft(self):
         provider = ScriptedProvider([tool('get_case_context', {}), self.draft('foreign-requirement'), final()])

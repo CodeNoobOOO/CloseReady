@@ -101,7 +101,7 @@ The poller fetches unseen IMAP messages (or the test double's inbox), associates
 POST /api/v1/cases/{case_id}/documents
 ```
 
-Non-PDF parts are ignored. Empty or oversized PDFs open a human review rather than guessing a requirement. Duplicate provider message IDs are idempotent.
+When the resolved Case has exactly one unresolved Requirement, the attachment is bound to that Requirement before processing. If several Requirements remain unresolved, the worker compares extracted type, period, entity, masked account and configured item references against the authorised candidates. Application code binds only one unique match and records how it was selected; zero or multiple matches stay unbound for human review. Non-PDF parts are ignored. Empty or oversized PDFs open a human review. Duplicate provider message IDs are idempotent.
 
 `POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` is unchanged: the LLM may record a commitment; the application schedules a reminder after policy checks.
 

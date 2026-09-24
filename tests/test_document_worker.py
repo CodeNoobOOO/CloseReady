@@ -16,11 +16,12 @@ from closeready.document_models import DocumentExtraction, DocumentFinding, Extr
 from closeready.document_processor import (
     DocumentProcessor,
     build_document_analysis_request,
+    resolve_requirement_id,
     validate_analysis_evidence,
 )
 from closeready.document_store import DocumentStore, document_jobs
 from closeready.runtime_store import RuntimeStore
-from closeready.store import DomainError, Store
+from closeready.store import DomainError, Store, cases
 from closeready.worker import AgentWorker
 from test_case_api import access_config, case_request
 from closeready.llm import ProviderError
@@ -392,6 +393,136 @@ class DocumentWorkerTests(unittest.TestCase):
             candidate_data,
         )
 
+    def test_analysis_request_excludes_resolved_requirements(self):
+        case = self.create_llm_case()
+        first = case.requirements[0]
+        resolved = first.model_copy(update={"status": "accepted"})
+        outstanding = first.model_copy(update={
+            "requirement_id": "req_outstanding",
+            "scope": first.scope.model_copy(update={
+                "account_ref": "account_two",
+                "masked_account_identifier": "****5678",
+            }),
+        })
+        case = case.model_copy(update={"requirements": [resolved, outstanding]})
+
+        request = build_document_analysis_request(
+            case,
+            extracted(text="Account ending in 5678"),
+            None,
+        )
+
+        self.assertEqual(
+            [item.requirement_id for item in request.candidate_requirements],
+            ["req_outstanding"],
+        )
+
+    def test_resolver_selects_unique_bank_requirement(self):
+        case = self.create_llm_case()
+        first = case.requirements[0]
+        second = first.model_copy(update={
+            "requirement_id": "req_second",
+            "scope": first.scope.model_copy(update={
+                "account_ref": "account_two",
+                "masked_account_identifier": "****5678",
+            }),
+        })
+        case = case.model_copy(update={"requirements": [first, second]})
+        analysis = LLMDocumentAnalysis(
+            detected_type="bank_statement",
+            entity_name="entity_demo",
+            account_identifier="Account ending in 5678",
+            detected_period="2026-07",
+            coverage_start=datetime(2026, 7, 1).date(),
+            coverage_end=datetime(2026, 7, 31).date(),
+        )
+
+        resolution = resolve_requirement_id(case, analysis)
+
+        self.assertEqual(resolution.requirement_id, "req_second")
+        self.assertEqual(resolution.outcome, "unique_structured_match")
+
+    def test_resolver_does_not_guess_when_bank_candidates_are_ambiguous(self):
+        case = self.create_llm_case()
+        first = case.requirements[0]
+        second = first.model_copy(update={
+            "requirement_id": "req_second",
+            "scope": first.scope.model_copy(update={"account_ref": "account_two"}),
+        })
+        case = case.model_copy(update={"requirements": [first, second]})
+        analysis = LLMDocumentAnalysis(
+            detected_type="bank_statement",
+            entity_name="entity_demo",
+            account_identifier="Account ending in 1234",
+            detected_period="2026-07",
+            coverage_start=datetime(2026, 7, 1).date(),
+            coverage_end=datetime(2026, 7, 31).date(),
+        )
+
+        resolution = resolve_requirement_id(case, analysis)
+
+        self.assertIsNone(resolution.requirement_id)
+        self.assertEqual(resolution.outcome, "ambiguous")
+        self.assertEqual(
+            set(resolution.candidate_requirement_ids),
+            {first.requirement_id, "req_second"},
+        )
+
+    def test_resolver_selects_unique_explicit_item_requirement(self):
+        payload = case_request()
+        payload["requirements"] = [
+            {
+                "document_type": "invoice",
+                "accounting_period": "2026-07",
+                "scope": {
+                    "entity_id": "entity_demo",
+                    "account_ref": None,
+                    "coverage_start": None,
+                    "coverage_end": None,
+                },
+                "completion_rule": {
+                    "kind": "explicit_items",
+                    "expected_item_refs": ["INV-001"],
+                    "allow_multiple_documents": False,
+                },
+            },
+            {
+                "document_type": "invoice",
+                "accounting_period": "2026-07",
+                "scope": {
+                    "entity_id": "entity_demo",
+                    "account_ref": None,
+                    "coverage_start": None,
+                    "coverage_end": None,
+                },
+                "completion_rule": {
+                    "kind": "explicit_items",
+                    "expected_item_refs": ["INV-002"],
+                    "allow_multiple_documents": False,
+                },
+            },
+        ]
+        case = self.store.create_case(
+            self.actor,
+            CreateCaseRequest.model_validate(payload),
+            "resolver-explicit-items",
+        )
+        analysis = LLMDocumentAnalysis(
+            detected_type="invoice",
+            entity_name="entity_demo",
+            detected_period="2026-07",
+            invoice_number="INV-002",
+            matched_item_refs=["INV-002"],
+        )
+
+        resolution = resolve_requirement_id(case, analysis)
+
+        self.assertEqual(
+            resolution.requirement_id,
+            case.requirements[1].requirement_id,
+        )
+        self.assertEqual(resolution.outcome, "unique_structured_match")
+
     def create_llm_case(self):
         payload = case_request()
 
@@ -513,17 +644,79 @@ class DocumentWorkerTests(unittest.TestCase):
             candidate.model_dump(),
         )
 
-        self.assertEqual(
-            candidate.masked_account_identifier,
-            "****1234",
+    def test_processor_binds_unbound_document_to_unique_structured_match(self):
+        llm_case = self.create_llm_case()
+        first = llm_case.requirements[0]
+        second = first.model_copy(update={
+            "requirement_id": "req_second",
+            "scope": first.scope.model_copy(update={
+                "account_ref": "account_two",
+                "masked_account_identifier": "****5678",
+            }),
+        })
+        llm_case = llm_case.model_copy(update={"requirements": [first, second]})
+        with self.store.write() as conn:
+            conn.execute(
+                update(cases)
+                .where(cases.c.case_id == llm_case.case_id)
+                .values(snapshot=llm_case.model_dump_json())
+            )
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=None,
+            expected_state_version=llm_case.state_version,
+            filename="statement-5678.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-unbound-5678",
+            key="llm-unbound-unique",
+        )
+        token = self.documents.claim(job.job_id)
+        analyzer = ScriptedDocumentAnalyzer(LLMDocumentAnalysis(
+            detected_type="bank_statement",
+            entity_name="entity_demo",
+            account_identifier="Account ending in 5678",
+            detected_period="2026-07",
+            coverage_start=datetime(2026, 7, 1).date(),
+            coverage_end=datetime(2026, 7, 31).date(),
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier", page=1,
+                    excerpt="Account ending in 5678",
+                ),
+                LLMDocumentEvidence(
+                    field="coverage_start", page=1,
+                    excerpt="01 July 2026 to 31 July 2026",
+                ),
+            ],
+        ))
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\nEntity ID: entity_demo\n"
+                    "Account ending in 5678\n"
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
         )
 
-        self.assertNotIn(
-            "account_ref",
-            candidate.model_dump(),
-        )
+        result = processor.execute_claimed(job.job_id, token)
 
-    
+        self.assertEqual(result.status, "completed")
+        documents = self.documents.list_documents(
+            self.actor, llm_case.case_id, None, 20
+        )
+        self.assertEqual(documents.items[0].requirement_id, "req_second")
+        changed = self.store.get_case(self.actor, llm_case.case_id)
+        self.assertEqual(changed.requirements[0].status, "missing")
+        self.assertEqual(changed.requirements[1].status, "accepted")
+        audit = self.store.audit_events(self.actor, llm_case.case_id, 0, 100)
+        binding = next(item for item in audit.items if item.action == "bind_document_requirement")
+        self.assertEqual(binding.details["match_source"], "unique_structured_match")
+
     def test_analysis_evidence_matches_real_page(self):
         extraction = extracted(
             text="Account ending in 1234"

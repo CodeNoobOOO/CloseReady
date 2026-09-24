@@ -108,6 +108,19 @@ def test_analysis_allows_unknown_fields_as_none():
     assert analysis.evidence == []
 
 
+def test_uncertainty_reason_requires_a_typed_code():
+    with pytest.raises(ValidationError):
+        LLMDocumentAnalysis(
+            uncertainty_reasons=["The full account number is not present."],
+        )
+
+
+def test_document_prompt_limits_uncertainty_to_current_requirement():
+    assert "Do not report the absence of a full account number" in INSTRUCTIONS
+    assert "Do not require invoice or receipt references for a bank statement" in INSTRUCTIONS
+    assert "uncertainty_codes" in INSTRUCTIONS
+
+
 def test_unknown_schema_fields_are_rejected():
     with pytest.raises(ValidationError):
         LLMDocumentAnalysis.model_validate(

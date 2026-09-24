@@ -2,11 +2,12 @@
 from contextlib import asynccontextmanager
 import os
 from typing import Annotated
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
@@ -218,6 +219,27 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def get_document(case_id: str, document_id: str, actor: Actor):
         return document_store.get_document(actor, case_id, document_id)
 
+    @app.get(
+        '/api/v1/cases/{case_id}/documents/{document_id}/content',
+        response_class=Response,
+    )
+    def get_document_content(case_id: str, document_id: str, actor: Actor):
+        document, content = document_store.get_content(
+            actor, case_id, document_id
+        )
+        encoded_filename = quote(document.original_filename, safe='')
+        return Response(
+            content=content,
+            media_type='application/pdf',
+            headers={
+                'Cache-Control': 'no-store',
+                'Content-Disposition': (
+                    "inline; filename*=UTF-8''" + encoded_filename
+                ),
+                'X-Content-Type-Options': 'nosniff',
+            },
+        )
+
     @app.post(
         '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',
         response_model=DocumentReviewDecisionRecord,
@@ -225,7 +247,43 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     def decide_document_review(
             case_id: str, document_id: str,
             body: DocumentReviewDecisionRequest, actor: Actor, key: Key):
-        return document_store.decide_review(actor, case_id, document_id, body, key)
+        result = document_store.decide_review(actor, case_id, document_id, body, key)
+        if not body.prepare_correction_email:
+            return result
+        if provider is None:
+            raise DomainError(
+                'LLM_UNAVAILABLE',
+                'The document was rejected, but live LLM configuration is not enabled.',
+                503)
+        if not provider.live:
+            raise DomainError(
+                'LIVE_LLM_REQUIRED',
+                'The document was rejected, but a live LLM is required to prepare the correction draft.',
+                503)
+        current = store.get_case(actor, case_id)
+        document = document_store.get_document(actor, case_id, document_id)
+        unresolved = [item for item in current.requirements
+                      if item.status not in ('accepted', 'waived')]
+        trigger_context = {
+            'type': 'rejected_document_correction',
+            'document_filename': document.original_filename,
+            'detected_document_type': result.source_finding.detected_type,
+            'detected_period': result.source_finding.detected_period,
+            'manager_reason': result.reason,
+            'required_items': [{
+                'requirement_id': item.requirement_id,
+                'document_type': item.document_type,
+                'accounting_period': item.accounting_period,
+            } for item in unresolved],
+        }
+        run = runtime_store.start(
+            actor, case_id, result.resulting_state_version,
+            'document-correction|' + key,
+            provider.provider_name, provider.model, provider.live,
+            event_type='document_correction_requested',
+            audit_action='prepare_document_correction',
+            trigger_context=trigger_context)
+        return result.model_copy(update={'follow_up_run_id': run.run_id})
 
     @app.get(
         '/api/v1/cases/{case_id}/documents/{document_id}/review-decisions',

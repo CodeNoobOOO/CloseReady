@@ -13,11 +13,22 @@ from closeready.document_processor import DocumentProcessor
 from test_case_api import OTHER_TOKEN, TOKEN, access_config, case_request
 
 
+class QueueOnlyLiveProvider:
+    provider_name = "queue_only_test"
+    model = "queue-only-test-model"
+    live = True
+
+    def complete(self, messages, tools):
+        raise AssertionError("The HTTP review request must only queue the run")
+
+
 class DocumentApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.url = "sqlite:///" + (Path(self.tmp.name) / "document-api.db").as_posix()
-        self.app = create_app(self.url, access_config())
+        self.app = create_app(
+            self.url, access_config(), provider=QueueOnlyLiveProvider()
+        )
         self.client = TestClient(self.app)
         self.client.__enter__()
         create_headers = {
@@ -113,6 +124,35 @@ class DocumentApiTests(unittest.TestCase):
             404,
         )
 
+    def test_authorised_manager_can_preview_original_pdf_without_public_url(self):
+        content = b"%PDF-1.4 manager review evidence"
+        response = self.upload(key="preview-api", content=content)
+        self.assertEqual(response.status_code, 202, response.text)
+        job = response.json()
+        path = (
+            f"/api/v1/cases/{self.case['case_id']}"
+            f"/documents/{job['document_id']}/content"
+        )
+
+        preview = self.client.get(
+            path,
+            headers={"Authorization": "Bearer " + TOKEN},
+        )
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.content, content)
+        self.assertEqual(preview.headers["content-type"], "application/pdf")
+        self.assertTrue(preview.headers["content-disposition"].startswith("inline;"))
+        self.assertEqual(preview.headers["cache-control"], "no-store")
+        self.assertEqual(
+            self.client.get(
+                path,
+                headers={"Authorization": "Bearer " + OTHER_TOKEN},
+            ).status_code,
+            404,
+        )
+        self.assertEqual(self.client.get(path).status_code, 401)
+
     def test_document_list_and_manager_accept_reviewed_evidence(self):
         job = self.process_for_review()
         case_id = self.case['case_id']
@@ -186,6 +226,62 @@ class DocumentApiTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 200, rejected.text)
         self.assertEqual(rejected.json()['document_status'], 'rejected')
+
+    def test_reject_can_queue_a_human_reviewed_correction_draft_with_clear_audit(self):
+        job = self.process_for_review(key='correction-upload')
+        case_id = self.case['case_id']
+        response = self.client.post(
+            f'/api/v1/cases/{case_id}/documents/{job["document_id"]}/review-decisions',
+            json={
+                'expected_state_version': 1,
+                'decision': 'reject_document',
+                'target_requirement_id': None,
+                'reason': 'Received July statement; September is required.',
+                'prepare_correction_email': True,
+            },
+            headers={
+                'Authorization': 'Bearer ' + TOKEN,
+                'Idempotency-Key': 'reject-and-prepare-correction',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result['decision'], 'reject_document')
+        self.assertIsNotNone(result['follow_up_run_id'])
+        run = self.client.get(
+            f'/api/v1/runs/{result["follow_up_run_id"]}',
+            headers={'Authorization': 'Bearer ' + TOKEN},
+        ).json()
+        self.assertEqual(run['status'], 'queued')
+        self.assertEqual(run['start_state_version'], result['resulting_state_version'])
+
+        audit = self.client.get(
+            f'/api/v1/cases/{case_id}/audit-events',
+            headers={'Authorization': 'Bearer ' + TOKEN},
+        ).json()['items']
+        rejected = next(item for item in audit if item['action'] == 'reject_document')
+        self.assertEqual(rejected['outcome'], 'rejected')
+        self.assertEqual(rejected['reason'], 'Received July statement; September is required.')
+        self.assertEqual(rejected['details']['document_id'], job['document_id'])
+        self.assertEqual(rejected['details']['decision'], 'reject_document')
+
+        replay = self.client.post(
+            f'/api/v1/cases/{case_id}/documents/{job["document_id"]}/review-decisions',
+            json={
+                'expected_state_version': 1,
+                'decision': 'reject_document',
+                'target_requirement_id': None,
+                'reason': 'Received July statement; September is required.',
+                'prepare_correction_email': True,
+            },
+            headers={
+                'Authorization': 'Bearer ' + TOKEN,
+                'Idempotency-Key': 'reject-and-prepare-correction',
+            },
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()['follow_up_run_id'], result['follow_up_run_id'])
 
     def test_upload_requires_authentication_and_current_case_state(self):
         path = f"/api/v1/cases/{self.case['case_id']}/documents"

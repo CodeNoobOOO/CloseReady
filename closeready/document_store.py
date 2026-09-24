@@ -329,6 +329,23 @@ class DocumentStore:
             raise DomainError("NOT_FOUND", "Document not found.", 404)
         return DocumentRecord.model_validate_json(raw)
 
+    def get_content(
+        self, actor: Principal, case_id: str, document_id: str
+    ) -> tuple[DocumentRecord, bytes]:
+        with self.store.engine.connect() as conn:
+            self.store._case(conn, actor, case_id)
+            if not actor.can_manage:
+                raise forbidden()
+            row = conn.execute(
+                select(documents.c.record, documents.c.content).where(
+                    documents.c.case_id == case_id,
+                    documents.c.document_id == document_id,
+                )
+            ).one_or_none()
+        if row is None:
+            raise DomainError("NOT_FOUND", "Document not found.", 404)
+        return DocumentRecord.model_validate_json(row.record), row.content
+
     def list_documents(
             self, actor: Principal, case_id: str, cursor: str | None,
             limit: int) -> DocumentPage:
@@ -512,10 +529,20 @@ class DocumentStore:
                 conn.execute(insert(document_review_responses).values(
                     actor_id=actor.user_id, case_id=case_id, key=key,
                     request_hash=digest, response=result.model_dump_json()))
+                audit_action, audit_outcome = {
+                    "accept_for_requirement": ("accept_document_evidence", "accepted"),
+                    "reject_document": ("reject_document", "rejected"),
+                    "reassign_for_processing": ("reassign_document_processing", "queued"),
+                }[request.decision]
                 self.store._audit(
-                    conn, actor, "decide_document_review", "executed",
+                    conn, actor, audit_action, audit_outcome,
                     request.reason, changed, old=current.state_version,
-                    new=changed.state_version)
+                    new=changed.state_version, details={
+                        "decision": request.decision,
+                        "document_id": document_id,
+                        "document_filename": document.original_filename,
+                        "target_requirement_id": request.target_requirement_id,
+                    })
             except DomainError as exc:
                 error = exc
                 self.store._audit(
@@ -749,6 +776,92 @@ class DocumentStore:
                 document=DocumentRecord.model_validate_json(document_row["record"]),
                 content=document_row["content"],
             )
+
+    def bind_claimed_requirement(
+        self,
+        job_id: str,
+        token: str,
+        requirement_id: str,
+        match_source: str,
+        candidate_requirement_ids: list[str],
+    ) -> DocumentRecord:
+        """Persist a deterministic worker match while retaining the claim gate."""
+        with self.store.write() as conn:
+            row = conn.execute(
+                select(document_jobs).where(document_jobs.c.job_id == job_id)
+            ).mappings().one_or_none()
+            if (
+                row is None
+                or row["status"] != "processing"
+                or row["claim_token"] != token
+            ):
+                raise DomainError("INVALID_CLAIM", "Document job claim is invalid.", 409)
+            document = DocumentRecord.model_validate_json(
+                conn.execute(select(documents.c.record).where(
+                    documents.c.document_id == row["document_id"]
+                )).scalar_one()
+            )
+            case = CaseSnapshot.model_validate_json(
+                conn.execute(select(cases.c.snapshot).where(
+                    cases.c.case_id == row["case_id"]
+                )).scalar_one()
+            )
+            if case.state_version != document.input_state_version:
+                raise DomainError(
+                    "STALE_STATE",
+                    "Reload case before matching this document.",
+                    409,
+                )
+            if document.requirement_id not in (None, requirement_id):
+                raise DomainError(
+                    "INVALID_REQUIREMENT",
+                    "Document is already bound to another requirement.",
+                    409,
+                )
+            requirement = next((
+                item for item in case.requirements
+                if item.requirement_id == requirement_id
+            ), None)
+            if requirement is None:
+                raise DomainError(
+                    "INVALID_REQUIREMENT",
+                    "Requirement does not belong to this case.",
+                    422,
+                )
+            if requirement.status in ("accepted", "waived"):
+                raise DomainError(
+                    "REQUIREMENT_RESOLVED",
+                    "Requirement is already resolved.",
+                    409,
+                )
+            bound = DocumentRecord.model_validate({
+                **document.model_dump(mode="json"),
+                "requirement_id": requirement_id,
+            })
+            self._replace_document(conn, bound)
+            self.store._audit(
+                conn,
+                self._system_actor(case),
+                "bind_document_requirement",
+                "executed",
+                (
+                    "Document assigned because it was the only outstanding "
+                    "requirement."
+                    if match_source == "single_candidate"
+                    else "Document matched one requirement from verified type, "
+                    "period, entity and document identifiers."
+                ),
+                case,
+                old=case.state_version,
+                new=case.state_version,
+                details={
+                    "document_id": document.document_id,
+                    "target_requirement_id": requirement_id,
+                    "match_source": match_source,
+                    "candidate_requirement_ids": candidate_requirement_ids,
+                },
+            )
+            return bound
 
     @staticmethod
     def _system_actor(case: CaseSnapshot) -> Principal:

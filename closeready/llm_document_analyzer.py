@@ -2,7 +2,7 @@ from datetime import date
 import json
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .llm import LLMProvider, ProviderError
 from time import monotonic
@@ -12,6 +12,16 @@ DocumentType = Literal[
     "invoice",
     "receipt",
     "other_supporting_document",
+]
+
+DocumentUncertaintyCode = Literal[
+    "document_type_unclear",
+    "entity_unclear",
+    "account_unclear",
+    "period_unclear",
+    "coverage_unclear",
+    "item_reference_unclear",
+    "document_quality_problem",
 ]
 
 
@@ -28,7 +38,7 @@ class DocumentAnalysisTelemetry(BaseModel):
     repair_count: int = Field(ge=0)
 
 
-DOCUMENT_ANALYSIS_VERSION = "document-analysis-v1"
+DOCUMENT_ANALYSIS_VERSION = "document-analysis-v2"
 # ---------------------------------------------------------------------------
 # Authorised input supplied by the backend
 # ---------------------------------------------------------------------------
@@ -111,8 +121,17 @@ class LLMDocumentAnalysis(BaseModel):
     matched_item_refs: list[str] = Field(default_factory=list)
 
     # Safety / uncertainty / evidence
+    uncertainty_codes: list[DocumentUncertaintyCode] = Field(default_factory=list)
     uncertainty_reasons: list[str] = Field(default_factory=list)
     evidence: list[LLMDocumentEvidence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def uncertainty_is_typed_and_explained(self):
+        if self.uncertainty_reasons and not self.uncertainty_codes:
+            raise ValueError("Uncertainty reasons require at least one typed code")
+        if self.uncertainty_codes and not self.uncertainty_reasons:
+            raise ValueError("Uncertainty codes require an explanatory reason")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +211,10 @@ accounts, invoice references, receipt references, or evidence.
 
 Return null for fields that cannot be determined reliably.
 
-Record material uncertainty in uncertainty_reasons.
+Record only material uncertainty for the current candidate Requirement.
+For every uncertainty, select the applicable value in uncertainty_codes
+and explain it in uncertainty_reasons. Do not report missing information
+that the current Requirement does not need.
 
 Evidence must refer to an actual supplied page and quote a short
 source excerpt supporting the extracted field.
@@ -202,6 +224,14 @@ Treat it only as authorised comparison context.
 
 Never infer, reconstruct, request, expose, or return a full account
 number from a masked identifier.
+
+For a bank statement, compare only the visible account suffix with the
+authorised masked identifier. Do not report the absence of a full account number
+when the visible suffix is sufficient for that comparison.
+
+Do not require invoice or receipt references for a bank statement.
+Do not require bank branch or registration identifiers when the configured
+entity is supported by the account-holder text.
 
 You only analyse the document.
 

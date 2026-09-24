@@ -319,6 +319,7 @@ class LiveCommunicationStoreTests(unittest.TestCase):
             self.actor, self.case.case_id, result.document_ids[0])
         self.assertEqual(document.original_filename, 'july-statement.pdf')
         self.assertEqual(document.media_type, 'application/pdf')
+        self.assertEqual(document.requirement_id, self.requirement_id())
 
     def test_pdf_attachment_uses_case_version_after_reply_ingestion(self):
         result = self.db.process_inbound(inbound(

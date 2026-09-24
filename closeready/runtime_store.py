@@ -378,7 +378,8 @@ class RuntimeStore:
         return record
 
     def start(self, actor, case_id, version, key, provider, model, live,
-              event_type='case_analysis_requested', audit_action='request_case_analysis'):
+              event_type='case_analysis_requested', audit_action='request_case_analysis',
+              trigger_context=None):
         with self.store.write() as conn:
             case = self.store._case(conn, actor, case_id)
             if not actor.can_manage:
@@ -386,7 +387,12 @@ class RuntimeStore:
             existing = conn.execute(select(runs).where(runs.c.actor_id == actor.user_id,
                 runs.c.case_id == case_id, runs.c.key == key)).mappings().one_or_none()
             if existing:
-                if existing['expected_version'] != version:
+                existing_record = json.loads(existing['record'])
+                existing_event = json.loads(conn.execute(select(events.c.record).where(
+                    events.c.event_id == existing_record['event_id']
+                )).scalar_one())
+                if (existing['expected_version'] != version
+                        or existing_event.get('trigger_context') != trigger_context):
                     raise DomainError('IDEMPOTENCY_CONFLICT', 'Key was used with different input.', 409)
                 return self._record(conn, existing)
             if case.state_version != version:
@@ -401,7 +407,8 @@ class RuntimeStore:
                 provider=provider, model=model, live=live)
             conn.execute(insert(events).values(event_id=event_id, case_id=case_id, record=json.dumps({
                 'type': event_type, 'occurred_at': now(), 'case_id': case_id,
-                'actor_user_id': actor.user_id, 'expected_state_version': version})))
+                'actor_user_id': actor.user_id, 'expected_state_version': version,
+                'trigger_context': trigger_context})))
             conn.execute(insert(runs).values(run_id=run_id, case_id=case_id, actor_id=actor.user_id,
                 key=key, expected_version=version, status='queued', record=record.model_dump_json()))
             self.store._audit(conn, actor, audit_action, 'queued', 'Analysis event recorded.',
@@ -442,6 +449,15 @@ class RuntimeStore:
             row = self._claimed(conn, actor, run_id, token)
             case = self.store._case(conn, actor, row['case_id'])
             return case
+
+    def context_for_model(self, actor, run_id, token):
+        with self.store.engine.connect() as conn:
+            row = self._claimed(conn, actor, run_id, token)
+            case = self.store._case(conn, actor, row['case_id'])
+            event = json.loads(conn.execute(select(events.c.record).where(
+                events.c.event_id == json.loads(row['record'])['event_id']
+            )).scalar_one())
+            return case, event.get('trigger_context')
 
     def trace(self, actor, run_id, token, trace):
         with self.store.write() as conn:

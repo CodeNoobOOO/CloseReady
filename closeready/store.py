@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     Column, Integer, MetaData, String, Table, Text as SQLText,
-    create_engine, insert, inspect, select, update,
+    and_, create_engine, desc, func, insert, inspect, or_, select, update,
 )
 from sqlalchemy.engine import make_url
 
@@ -179,12 +179,34 @@ class Store:
         )
 
     def list_cases(self, actor: Principal, cursor: str | None, limit: int) -> CasePage:
-        query = select(cases.c.snapshot).where(cases.c.client_id.in_(actor.client_ids))
-        if cursor is not None:
-            query = query.where(cases.c.case_id > cursor)
+        creation_order = select(
+            audit.c.case_id.label('case_id'),
+            func.min(audit.c.audit_id).label('created_order'),
+        ).where(audit.c.case_id.is_not(None)).group_by(audit.c.case_id).subquery()
+        query = select(cases.c.snapshot, creation_order.c.created_order).join(
+            creation_order, creation_order.c.case_id == cases.c.case_id,
+        ).where(cases.c.client_id.in_(actor.client_ids))
         with self.engine.connect() as conn:
-            rows = conn.execute(query.order_by(cases.c.case_id).limit(limit + 1)).scalars().all()
-        items = [CaseSnapshot.model_validate_json(row) for row in rows[:limit]]
+            if cursor is not None:
+                cursor_order = conn.execute(select(creation_order.c.created_order).join(
+                    cases, cases.c.case_id == creation_order.c.case_id,
+                ).where(
+                    cases.c.case_id == cursor,
+                    cases.c.client_id.in_(actor.client_ids),
+                )).scalar_one_or_none()
+                if cursor_order is None:
+                    return CasePage(items=[], next_cursor=None)
+                query = query.where(or_(
+                    creation_order.c.created_order < cursor_order,
+                    and_(
+                        creation_order.c.created_order == cursor_order,
+                        cases.c.case_id < cursor,
+                    ),
+                ))
+            rows = conn.execute(query.order_by(
+                desc(creation_order.c.created_order), desc(cases.c.case_id),
+            ).limit(limit + 1)).all()
+        items = [CaseSnapshot.model_validate_json(row.snapshot) for row in rows[:limit]]
         return CasePage(items=items, next_cursor=items[-1].case_id if len(rows) > limit else None)
 
     def audit_events(self, actor: Principal, case_id: str, cursor: int, limit: int) -> AuditPage:
@@ -195,13 +217,15 @@ class Store:
         items = [dict(json.loads(row['record']), audit_id=row['audit_id']) for row in rows[:limit]]
         return AuditPage(items=items, next_cursor=str(rows[limit - 1]['audit_id']) if len(rows) > limit else None)
 
-    def _audit(self, conn, actor, action, outcome, reason, case=None, old=None, new=None, event_id=None, run_id=None):
+    def _audit(self, conn, actor, action, outcome, reason, case=None, old=None, new=None,
+               event_id=None, run_id=None, details=None):
         record = {'case_id': case.case_id if case else None, 'event_id': event_id, 'run_id': run_id,
             'actor_user_id': actor.user_id, 'action': action, 'outcome': outcome, 'reason': reason,
             'occurred_at': datetime.now(timezone.utc).isoformat(),
             'old_state_version': old, 'new_state_version': new,
             'policy_id': case.policy_id if case else None,
-            'policy_version': case.policy_version if case else None}
+            'policy_version': case.policy_version if case else None,
+            'details': details or {}}
         conn.execute(insert(audit).values(case_id=record['case_id'], record=json.dumps(record)))
 
     def _replay(self, conn, actor, operation, key, digest):
