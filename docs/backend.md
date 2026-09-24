@@ -130,6 +130,8 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
 | POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Deliver an approved outbox item | Assigned manager; `test_sink` or `smtp` |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/retry | Create a new outbox item after confirmed failed delivery | Assigned manager; current state |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/reconcile | Confirm, retry or leave unresolved an unknown delivery | Assigned manager; current state |
 | GET /api/v1/cases/{case_id}/mailbox | Locally persisted delivery copies | Actor with client grant; mail enabled |
 | POST /api/v1/inbound-mail/poll | Poll IMAP/test inbox and associate replies | Manager; mail enabled |
 | GET /api/v1/inbound-mail/quarantine | Unmatched inbound mail | Manager |
@@ -140,6 +142,8 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | GET /api/v1/cases/{case_id}/commitments | Recorded commitments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
 | POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due reminders | Manager; `test_sink` or `smtp` |
+| POST /api/v1/cases/{case_id}/reminders/{reminder_id}/retry | Create a new outbox item after a failed reminder send | Assigned manager; current state |
+| POST /api/v1/cases/{case_id}/reminders/{reminder_id}/reconcile | Confirm, retry or leave unresolved an unknown reminder | Assigned manager; current state |
 
 List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Document upload also requires multipart fields `file`, `expected_state_version` and optional `requirement_id`. Keys are scoped by actor and operation. Replays preserve the original response, which may be older than the current case; GET the case for current state.
 

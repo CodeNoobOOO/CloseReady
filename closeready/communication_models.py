@@ -45,6 +45,23 @@ class DeliverOutboxRequest(ContractModel):
     contact_id: Text | None = None
 
 
+class RetryDeliveryRequest(ContractModel):
+    expected_state_version: PositiveInt
+
+
+class ReconcileDeliveryRequest(ContractModel):
+    expected_state_version: PositiveInt
+    decision: Literal['confirm_delivered', 'retry_delivery', 'keep_unresolved']
+
+
+class DeliveryRecoveryResult(ContractModel):
+    source: Literal['outbox', 'reminder']
+    source_id: Text
+    source_status: Literal['sent', 'failed', 'delivery_unknown']
+    decision: Literal['retry_delivery', 'confirm_delivered', 'keep_unresolved']
+    retry_outbox_id: Text | None = None
+
+
 class AssessReplyRequest(ContractModel):
     expected_state_version: PositiveInt
 

@@ -10,10 +10,11 @@ from sqlalchemy import Column, MetaData, String, Table, Text, UniqueConstraint, 
 from .case_references import CaseCommunicationReference, CaseReferenceResolution
 from .communication_models import (
     AssessReplyResult, CommitmentPage, CommitmentRecord, DeliverOutboxRequest,
-    DeliveryResult, DispatchRemindersResult, FindingPage, InboundPollResult,
-    InboundProcessResult, InboundQuarantinePage, InboundQuarantineRecord,
-    IngestReplyRequest, IngestReplyResult, MailboxMessage, MailboxPage,
-    QuarantinedReply, ReminderPage, ReminderRecord, ReplyPage, ReplyRecord,
+    DeliveryRecoveryResult, DeliveryResult, DispatchRemindersResult, FindingPage,
+    InboundPollResult, InboundProcessResult, InboundQuarantinePage,
+    InboundQuarantineRecord, IngestReplyRequest, IngestReplyResult,
+    MailboxMessage, MailboxPage, QuarantinedReply, ReconcileDeliveryRequest,
+    ReminderPage, ReminderRecord, ReplyPage, ReplyRecord, RetryDeliveryRequest,
 )
 from .content_guard import validate_customer_visible_draft
 from .mail import MailBackend
@@ -398,6 +399,9 @@ class CommunicationStore:
                 record=message.model_dump_json()))
             self._remember_thread(conn, provider_id, case.case_id, reference.public_reference,
                 contact.contact_id, 'outbox', queued.outbox_id)
+            case = self.store._case(conn, actor, case.case_id)
+            self._schedule_follow_up(
+                conn, actor, case, queued.requirement_ids, self._policy(case))
         elif status == 'failed':
             self._delivery_review(
                 conn, actor, case, queued.requirement_ids, 'DELIVERY_FAILED', queued.outbox_id)
@@ -409,6 +413,134 @@ class CommunicationStore:
         return DeliveryResult(outbox_id=queued.outbox_id, delivery_status=status,
             recipient_contact_id=contact.contact_id, provider_message_id=provider_id,
             mailbox_backend=backend, live=live)
+
+    def _new_retry_outbox(self, conn, actor, case, requirement_ids, subject, body):
+        outstanding = self._outstanding(case, requirement_ids)
+        if set(outstanding) != set(requirement_ids):
+            raise DomainError('OBSOLETE_DRAFT',
+                'One or more drafted items are no longer outstanding; regenerate the message.', 409)
+        validate_customer_visible_draft(MessageDraft(
+            subject=subject, body=body, requirement_ids=requirement_ids))
+        record = OutboxRecord(
+            outbox_id='outbox_' + uuid4().hex, case_id=case.case_id,
+            review_task_id='review_retry_' + uuid4().hex,
+            requirement_ids=list(requirement_ids), subject=subject, body=body,
+            created_by=actor.user_id, created_at=utcnow())
+        self.runtime.insert_outbox(conn, record)
+        return record
+
+    def _load_reminder(self, conn, case_id, reminder_id):
+        raw = conn.execute(select(reminders.c.record).where(
+            reminders.c.reminder_id == reminder_id,
+            reminders.c.case_id == case_id)).scalar_one_or_none()
+        if raw is None:
+            raise DomainError('NOT_FOUND', 'Reminder not found.', 404)
+        return ReminderRecord.model_validate_json(raw)
+
+    def retry_outbox(self, actor, case_id, outbox_id, request: RetryDeliveryRequest, key: str):
+        return self._recover_delivery(
+            actor, case_id, source='outbox', source_id=outbox_id,
+            request=request, key=key, forced_decision='retry_delivery')
+
+    def reconcile_outbox(self, actor, case_id, outbox_id,
+                         request: ReconcileDeliveryRequest, key: str):
+        return self._recover_delivery(
+            actor, case_id, source='outbox', source_id=outbox_id,
+            request=request, key=key)
+
+    def retry_reminder(self, actor, case_id, reminder_id, request: RetryDeliveryRequest, key: str):
+        return self._recover_delivery(
+            actor, case_id, source='reminder', source_id=reminder_id,
+            request=request, key=key, forced_decision='retry_delivery')
+
+    def reconcile_reminder(self, actor, case_id, reminder_id,
+                           request: ReconcileDeliveryRequest, key: str):
+        return self._recover_delivery(
+            actor, case_id, source='reminder', source_id=reminder_id,
+            request=request, key=key)
+
+    def _recover_delivery(self, actor, case_id, *, source, source_id, request, key,
+                          forced_decision=None):
+        self._require_mail()
+        decision = forced_decision or request.decision
+        digest = payload_digest({**request.model_dump(mode='json'), 'decision': decision})
+        operation = 'recover_delivery:' + source + ':' + source_id
+        error, result = None, None
+        with self.store.write() as conn:
+            try:
+                case = self.store._case(conn, actor, case_id)
+                if not actor.can_manage:
+                    raise forbidden()
+                replay = self._replay_json(conn, actor, operation, key, digest)
+                if replay:
+                    return DeliveryRecoveryResult.model_validate_json(replay)
+                if case.state_version != request.expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                if source == 'outbox':
+                    record = self.runtime.load_outbox(conn, actor, case_id, source_id)
+                    status = record.delivery_status
+                    requirement_ids = record.requirement_ids
+                    subject, body = record.subject, record.body
+                else:
+                    record = self._load_reminder(conn, case_id, source_id)
+                    status = record.status
+                    requirement_ids = record.requirement_ids
+                    subject, body = record.subject, record.body
+                if forced_decision == 'retry_delivery' and status != 'failed':
+                    raise DomainError(
+                        'DELIVERY_NOT_FAILED',
+                        'Only a confirmed failed delivery can be retried this way.', 409)
+                if forced_decision is None and status != 'delivery_unknown':
+                    raise DomainError(
+                        'DELIVERY_NOT_UNKNOWN',
+                        'Reconciliation applies only to an unknown delivery.', 409)
+                if decision == 'keep_unresolved':
+                    result = DeliveryRecoveryResult(
+                        source=source, source_id=source_id, source_status=status,
+                        decision=decision)
+                    self._remember(conn, actor, operation, key, digest, result)
+                    return result
+                review_code = {
+                    ('outbox', 'failed'): 'DELIVERY_FAILED',
+                    ('outbox', 'delivery_unknown'): 'DELIVERY_UNKNOWN',
+                    ('reminder', 'failed'): 'REMINDER_DELIVERY_FAILED',
+                    ('reminder', 'delivery_unknown'): 'REMINDER_DELIVERY_UNKNOWN',
+                }[(source, status)]
+                if decision == 'confirm_delivered':
+                    next_status = 'sent'
+                    reason = 'Manager confirmed the message was delivered.'
+                else:
+                    next_status = 'failed'
+                    reason = 'Manager confirmed the message was not delivered and approved a new attempt.'
+                if source == 'outbox':
+                    updated = OutboxRecord.model_validate({
+                        **record.model_dump(mode='json'), 'delivery_status': next_status})
+                    self.runtime.save_outbox(conn, updated)
+                else:
+                    updated = ReminderRecord.model_validate({
+                        **record.model_dump(mode='json'), 'status': next_status})
+                    self._save_reminder(conn, updated)
+                self.runtime.resolve_review_by_key(
+                    conn, actor, case, review_code + '|' + source_id, 'dismissed', reason)
+                retry = None
+                if decision == 'retry_delivery':
+                    retry = self._new_retry_outbox(
+                        conn, actor, case, requirement_ids, subject, body)
+                case = self._bump(conn, actor, case, reason, 'recover_delivery')
+                if decision == 'confirm_delivered':
+                    self._schedule_follow_up(
+                        conn, actor, case, requirement_ids, self._policy(case))
+                result = DeliveryRecoveryResult(
+                    source=source, source_id=source_id, source_status=next_status,
+                    decision=decision,
+                    retry_outbox_id=None if retry is None else retry.outbox_id)
+                self._remember(conn, actor, operation, key, digest, result)
+            except DomainError as exc:
+                error = exc
+                self.store._audit(conn, actor, 'recover_delivery', 'blocked', exc.code)
+        if error:
+            raise error
+        return result
 
     def ingest_reply(self, actor, case_id, request: IngestReplyRequest, key: str,
                      *, conversation_ref=None, attachment_document_ids=None):
@@ -627,14 +759,22 @@ class CommunicationStore:
             scheduled_at = self._next_window(policy, scheduled_at)
         draft = self._reminder_draft(case, outstanding)
         validate_customer_visible_draft(draft)
-        dedupe_key = self._reminder_dedupe_key(
-            case.case_id, outstanding, contact.contact_id, scheduled_at)
-        existing = conn.execute(select(reminders.c.record).where(
-            reminders.c.case_id == case.case_id, reminders.c.dedupe_key == dedupe_key)).scalar_one_or_none()
-        if existing:
+        existing = None
+        dedupe_key = None
+        for _ in range(60):
+            dedupe_key = self._reminder_dedupe_key(
+                case.case_id, outstanding, contact.contact_id, scheduled_at)
+            existing = conn.execute(select(reminders.c.record).where(
+                reminders.c.case_id == case.case_id,
+                reminders.c.dedupe_key == dedupe_key)).scalar_one_or_none()
+            if existing is None:
+                break
             current = ReminderRecord.model_validate_json(existing)
-            if current.status != 'cancelled':
+            if current.status in ('scheduled', 'paused'):
                 return current
+            if current.status == 'cancelled':
+                break
+            scheduled_at += timedelta(minutes=1)
         source_id = None
         if commitment is not None:
             source_id = commitment.commitment_id
