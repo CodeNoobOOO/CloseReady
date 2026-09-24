@@ -3,7 +3,6 @@ import argparse
 import logging
 import os
 import time
-
 from .config import load_access_config
 from .communication_store import CommunicationStore
 from .document_processor import DocumentProcessor
@@ -13,7 +12,7 @@ from .provider_factory import provider_from_environment
 from .runtime import AgentRuntime
 from .runtime_store import RuntimeStore
 from .store import DomainError, Store
-
+from .llm_document_analyzer import LiveLLMDocumentAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +87,23 @@ def worker_from_environment():
     document_store = DocumentStore(
         store, on_requirements_resolved=communication.cancel_scheduled_for_resolved)
     communication.document_store = document_store
+    provider = provider_from_environment()
+
+    document_analyzer = LiveLLMDocumentAnalyzer(
+        provider,
+    )
+
+    document_processor = DocumentProcessor(
+        document_store,
+        analyzer=document_analyzer,
+    )
+
     return AgentWorker(
         runtime_store,
-        provider_from_environment(),
+        provider,
         access,
         document_store=document_store,
-        document_processor=DocumentProcessor(document_store),
+        document_processor=document_processor,
         communication=communication,
     )
 

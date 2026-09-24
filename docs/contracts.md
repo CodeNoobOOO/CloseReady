@@ -299,3 +299,7 @@ Only trusted mail ingestion creates reply events after sender/case association c
 8. A checklist with no configured requirements cannot become ready.
 
 Each owner supplies component tests. Student 4 aggregates evaluation; final human confirmation is excluded from routine autonomous-handling steps that the system is expected to automate.
+
+## Undo final readiness confirmation
+
+`POST /api/v1/cases/{case_id}/reopen` requires manager bearer authentication and an `Idempotency-Key`. Body: `{"expected_state_version": 3, "reason": "Confirmation needs further review."}`. The reason must be nonblank and at most 2000 characters. Only `ready` transitions to `ready_for_confirmation`; the state version increments once, and accepted/waived requirements and their evidence are preserved. The server records `reopen_case`, actor, reason and old/new versions in the audit trail; it does not remove the original confirmation, resend messages or recreate reminders. Reconfirmation uses the existing readiness gate. Non-ready cases return `CASE_NOT_READY` (409); stale versions return `STALE_STATE` (409). Same-key replays return the original response; different input under that key returns `IDEMPOTENCY_CONFLICT`. No database migration is required.

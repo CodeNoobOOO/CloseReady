@@ -7,13 +7,14 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
 from .case_requests import (
     AuditPage, CasePage, ChangeDeadlineRequest, ConfirmReadinessRequest,
-    CreateCaseRequest,
+    CreateCaseRequest, ReopenCaseRequest,
 )
 from .case_references import CaseCommunicationReference
 from .config import AccessConfig, Principal, load_access_config
@@ -36,6 +37,7 @@ from .communication_models import (
     ReminderPage, ReplyPage,
 )
 from .communication_store import CommunicationStore
+from pathlib import Path
 from .communication_store import communication_metadata
 from .document_models import (
     DocumentFinding, DocumentJobRecord, DocumentPage, DocumentRecord,
@@ -63,6 +65,17 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
             store.engine.dispose()
 
     app = FastAPI(title='CloseReady Case API', version='0.1.0', lifespan=lifespan)
+    @app.get('/app', include_in_schema=False)
+    def frontend():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'index.html', headers={'Cache-Control': 'no-store'})
+
+    @app.get('/app/app.js', include_in_schema=False)
+    def frontend_js():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'app.js', media_type='text/javascript', headers={'Cache-Control': 'no-store'})
+
+    @app.get('/app/style.css', include_in_schema=False)
+    def frontend_css():
+        return FileResponse(Path(__file__).parent / 'frontend' / 'style.css', media_type='text/css', headers={'Cache-Control': 'no-store'})
     app.state.store = store
     app.state.runtime_store = runtime_store
     app.state.communication = communication
@@ -147,6 +160,10 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.patch('/api/v1/cases/{case_id}/deadline', response_model=CaseSnapshot)
     def change_deadline(case_id: str, body: ChangeDeadlineRequest, actor: Actor, key: Key):
         return store.change_deadline(actor, case_id, body, key)
+
+    @app.post('/api/v1/cases/{case_id}/reopen', response_model=CaseSnapshot)
+    def reopen_case(case_id: str, body: ReopenCaseRequest, actor: Actor, key: Key):
+        return store.reopen_case(actor, case_id, body, key)
 
     @app.post('/api/v1/cases/{case_id}/confirm-readiness', response_model=CaseSnapshot)
     def confirm_readiness(case_id: str, body: ConfirmReadinessRequest, actor: Actor, key: Key):

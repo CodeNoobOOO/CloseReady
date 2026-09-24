@@ -13,19 +13,39 @@ from closeready.case_requests import ChangeDeadlineRequest, CreateCaseRequest
 from closeready.document_assessment import assess_document
 from closeready.document_extraction import calculate_file_hash
 from closeready.document_models import DocumentExtraction, DocumentFinding, ExtractedPage
-from closeready.document_processor import DocumentProcessor
+from closeready.document_processor import (
+    DocumentProcessor,
+    build_document_analysis_request,
+    validate_analysis_evidence,
+)
 from closeready.document_store import DocumentStore, document_jobs
 from closeready.runtime_store import RuntimeStore
 from closeready.store import DomainError, Store
 from closeready.worker import AgentWorker
 from test_case_api import access_config, case_request
-
+from closeready.llm import ProviderError
+from closeready.llm_document_analyzer import (
+    LLMDocumentAnalysis,
+    LLMDocumentEvidence,
+    LiveLLMDocumentAnalyzer,
+    ScriptedDocumentAnalyzer,
+)
 
 GOOD_TEXT = """DBS Bank Statement
 Statement Period: 01 July 2026 to 31 July 2026
 Entity ID: entity_demo
 Account Ref: account_demo
 """
+class FailingDocumentProvider:
+    provider_name = "failing_test"
+    model = "failing-model"
+    live = True
+
+    def complete(self, messages, tools):
+        raise ProviderError(
+            "NETWORK_ERROR",
+            True,
+        )
 
 
 def extracted(text=GOOD_TEXT, file_hash="test-hash"):
@@ -277,6 +297,454 @@ class DocumentWorkerTests(unittest.TestCase):
         self.assertEqual(
             self.store.get_case(self.actor, self.case.case_id).requirements[0].status,
             "accepted",
+        )
+
+    def test_document_processor_accepts_optional_analyzer(self):
+        analyzer = ScriptedDocumentAnalyzer(
+            LLMDocumentAnalysis(
+                detected_type="bank_statement",
+            )
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            analyzer=analyzer,
+        )
+
+        self.assertIs(processor.analyzer, analyzer)
+
+    def test_build_document_analysis_request_uses_authorised_context(self):
+        case = self.store.get_case(
+            self.actor,
+            self.case.case_id,
+        )
+
+        requirement = case.requirements[0]
+
+        updated_scope = requirement.scope.model_copy(
+            update={
+                "masked_account_identifier": "****1234",
+            }
+        )
+
+        updated_requirement = requirement.model_copy(
+            update={
+                "scope": updated_scope,
+            }
+        )
+
+        case = case.model_copy(
+            update={
+                "requirements": [
+                    updated_requirement,
+                    *case.requirements[1:],
+                ]
+            }
+        )
+
+        extraction = extracted(
+            text=(
+                "DBS Bank Statement "
+                "Account ending in 1234"
+            )
+        )
+
+        request = build_document_analysis_request(
+            case,
+            extraction,
+            updated_requirement.requirement_id,
+        )
+
+        self.assertEqual(
+            request.accounting_period,
+            case.accounting_period,
+        )
+
+        self.assertEqual(
+            request.pages,
+            [
+                "DBS Bank Statement "
+                "Account ending in 1234"
+            ],
+        )
+
+        self.assertEqual(
+            len(request.candidate_requirements),
+            1,
+        )
+
+        candidate = request.candidate_requirements[0]
+
+        self.assertEqual(
+            candidate.requirement_id,
+            updated_requirement.requirement_id,
+        )
+
+        self.assertEqual(
+            candidate.masked_account_identifier,
+            "****1234",
+        )
+
+        candidate_data = candidate.model_dump()
+
+        self.assertNotIn(
+            "account_ref",
+            candidate_data,
+        )
+
+    def create_llm_case(self):
+        payload = case_request()
+
+        payload["requirements"][0]["scope"][
+            "masked_account_identifier"
+        ] = "****1234"
+
+        return self.store.create_case(
+            self.actor,
+            CreateCaseRequest.model_validate(payload),
+            "document-worker-llm-case",
+        )
+        
+    def test_processor_uses_scripted_analyzer_path(self):
+        llm_case = self.create_llm_case()
+
+        requirement = llm_case.requirements[0]
+
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=requirement.requirement_id,
+            expected_state_version=llm_case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-llm-pdf",
+            key="llm-document-1",
+        )
+
+        token = self.documents.claim(job.job_id)
+
+        analyzer = ScriptedDocumentAnalyzer(
+            LLMDocumentAnalysis(
+                detected_type="bank_statement",
+                entity_name="entity_demo",
+                account_identifier="Account ending in 1234",
+                detected_period="2026-07",
+                coverage_start=datetime(2026, 7, 1).date(),
+                coverage_end=datetime(2026, 7, 31).date(),
+                evidence=[
+                    {
+                        "field": "account_identifier",
+                        "page": 1,
+                        "excerpt": "Account ending in 1234",
+                    },
+                    {
+                        "field": "coverage_start",
+                        "page": 1,
+                        "excerpt": (
+                            "Statement Period: "
+                            "01 July 2026 to 31 July 2026"
+                        ),
+                    },
+                ],
+            )
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\n"
+                    "Entity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: "
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(
+            job.job_id,
+            token,
+        )
+
+        self.assertEqual(
+            result.status,
+            "completed",
+        )
+
+        finding = self.documents.get_finding(
+            self.actor,
+            llm_case.case_id,
+            job.document_id,
+        )
+
+        self.assertEqual(
+            finding.result,
+            "satisfies",
+        )
+
+        self.assertEqual(
+            finding.account_match,
+            "match",
+        )
+
+        self.assertEqual(
+            finding.entity_match,
+            "match",
+        )
+
+        request = analyzer.last_request
+
+        self.assertIsNotNone(request)
+
+        assert request is not None
+
+        candidate = request.candidate_requirements[0]
+
+        self.assertEqual(
+            candidate.masked_account_identifier,
+            "****1234",
+        )
+
+        self.assertNotIn(
+            "account_ref",
+            candidate.model_dump(),
+        )
+
+        self.assertEqual(
+            candidate.masked_account_identifier,
+            "****1234",
+        )
+
+        self.assertNotIn(
+            "account_ref",
+            candidate.model_dump(),
+        )
+
+    
+    def test_analysis_evidence_matches_real_page(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=1,
+                    excerpt="Account ending in 1234",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_rejects_invalid_page(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=999,
+                    excerpt="Account ending in 1234",
+                )
+            ]
+        )
+
+        self.assertFalse(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_rejects_invented_excerpt(self):
+        extraction = extracted(
+            text="Account ending in 1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=1,
+                    excerpt="Account ending in 9999",
+                )
+            ]
+        )
+
+        self.assertFalse(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_processor_invalid_llm_evidence_needs_review(self):
+        llm_case = self.create_llm_case()
+        requirement = llm_case.requirements[0]
+
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=requirement.requirement_id,
+            expected_state_version=llm_case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-invalid-evidence",
+            key="llm-invalid-evidence",
+        )
+
+        token = self.documents.claim(job.job_id)
+
+        self.assertIsNotNone(token)
+        assert token is not None
+
+        analyzer = ScriptedDocumentAnalyzer(
+            LLMDocumentAnalysis(
+                detected_type="bank_statement",
+                entity_name="entity_demo",
+                account_identifier="Account ending in 1234",
+                detected_period="2026-07",
+                coverage_start=datetime(2026, 7, 1).date(),
+                coverage_end=datetime(2026, 7, 31).date(),
+                evidence=[
+                    LLMDocumentEvidence(
+                        field="account_identifier",
+                        page=999,
+                        excerpt="This evidence does not exist",
+                    )
+                ],
+            )
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\n"
+                    "Entity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: "
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(
+            job.job_id,
+            token,
+        )
+
+        self.assertEqual(
+            result.status,
+            "needs_review",
+        )
+
+        finding = self.documents.get_finding(
+            self.actor,
+            llm_case.case_id,
+            job.document_id,
+        )
+
+        self.assertIsNotNone(finding)
+        assert finding is not None
+
+        self.assertEqual(
+            finding.result,
+            "needs_review",
+        )
+
+        self.assertTrue(
+            any(
+                "evidence" in reason.lower()
+                for reason in finding.uncertainty_reasons
+            )
+        )
+
+        unchanged = self.store.get_case(
+            self.actor,
+            llm_case.case_id,
+        )
+
+        self.assertEqual(
+            unchanged.requirements[0].status,
+            "missing",
+        )
+    def test_document_provider_network_error_is_controlled_failure(self):
+        llm_case = self.create_llm_case()
+        requirement = llm_case.requirements[0]
+
+        job = self.documents.upload(
+            self.actor,
+            llm_case.case_id,
+            requirement_id=requirement.requirement_id,
+            expected_state_version=llm_case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=b"synthetic-provider-failure",
+            key="llm-provider-failure",
+        )
+
+        token = self.documents.claim(job.job_id)
+
+        self.assertIsNotNone(token)
+        assert token is not None
+
+        analyzer = LiveLLMDocumentAnalyzer(
+            FailingDocumentProvider()
+        )
+
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\n"
+                    "Entity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: "
+                    "01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(
+            job.job_id,
+            token,
+        )
+
+        self.assertEqual(
+            result.status,
+            "failed",
+        )
+
+        self.assertEqual(
+            result.error_code,
+            "DOCUMENT_PROCESSING_FAILED",
+        )
+
+        unchanged = self.store.get_case(
+            self.actor,
+            llm_case.case_id,
+        )
+
+        self.assertEqual(
+            unchanged.requirements[0].status,
+            "missing",
         )
 
 

@@ -23,8 +23,10 @@ Verified on 2026-09-10: deepseek-flash completed two native Chat Completions req
 
 ## Start here
 
-- [Shared contracts v1.2](docs/contracts.md): data formats, module boundaries, implemented/proposed HTTP APIs and validation rules.
-- [Communication](docs/communication.md): approved contacts, test_sink sandbox, SMTP/IMAP live mail, reply ingest, commitments and reminders.
+The dashboard is served at `/app` on the same origin. Connect with a locally configured bearer token. It supports case checklists, PDF uploads and processing, evidence review, final readiness confirmation, reviewed messages, sandbox replies, reminders, run traces and audit history. See [frontend guide](docs/frontend.md) and [evaluation protocol](docs/evaluation.md). Follow-up pause/resume is not yet exposed by the backend.
+
+- [Shared contracts v1.2](docs/contracts.md): data formats and implemented APIs.
+- [Communication](docs/communication.md): sandbox and SMTP/IMAP configuration.
 - [Real LLM runtime](docs/llm-runtime.md): provider adapter, tool loop, errors, live mail and deployment requirements.
 - [Business acceptance](docs/business-acceptance.md): source review, seven rubric areas and business-connected acceptance scenarios.
 - [Single-host deployment](deploy/README.md): container topology, health checks, secret boundary, backup, restore and rollback.

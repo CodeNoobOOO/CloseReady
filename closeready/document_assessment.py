@@ -5,13 +5,21 @@ from uuid import uuid4
 from closeready.document_models import (
     DocumentExtraction,
     DocumentFinding,
+    MatchResult,
 )
+from closeready.document_normalization import (
+    accounts_match,
+    entities_match,
+)
+from closeready.llm_document_analyzer import LLMDocumentAnalysis
 from closeready.models import (
     CaseSnapshot,
     DocumentType,
     EvidenceRef,
     Requirement,
 )
+
+
 
 MONTHS = {
     "january": 1,
@@ -468,6 +476,486 @@ def assess_document(
         coverage_start=coverage_start,
         coverage_end=coverage_end,
         matched_item_refs=[],
+        uncertainty_reasons=[],
+        evidence_refs=evidence_refs,
+        issues=[],
+    )
+
+
+def _llm_match_result(value: bool | None) -> MatchResult:
+    if value is True:
+        return "match"
+
+    if value is False:
+        return "mismatch"
+
+    return "unknown"
+
+
+def assess_llm_analysis(
+    *,
+    case: CaseSnapshot,
+    document_id: str,
+    analysis: LLMDocumentAnalysis,
+    requirement_id: str | None,
+    duplicate: bool = False,
+) -> DocumentFinding:
+    finding_id = f"finding_document_{uuid4().hex}"
+
+    evidence_refs = [
+        EvidenceRef(
+            document_id=document_id,
+            page=evidence.page,
+            excerpt=evidence.excerpt,
+        )
+        for evidence in analysis.evidence
+    ]
+
+    # 1. Exact duplicate
+    if duplicate:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match="unknown",
+            account_match=None,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=["Exact duplicate file hash detected."],
+            evidence_refs=evidence_refs,
+            issues=["Duplicate document must not create duplicate satisfaction."],
+        )
+
+    # 2. No requirement supplied
+    if requirement_id is None:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=None,
+            result="unmatched",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match="unknown",
+            account_match=None,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=[
+                "No authorised requirement was associated with the document."
+            ],
+            evidence_refs=evidence_refs,
+            issues=["Document requires manual requirement assignment."],
+        )
+
+    # 3. Requirement must belong to the current Case
+    requirement = _requirement_by_id(
+        case,
+        requirement_id,
+    )
+
+    if requirement is None:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=None,
+            result="unmatched",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match="unknown",
+            account_match=None,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=[
+                "Requirement reference is not authorised for this Case."
+            ],
+            evidence_refs=evidence_refs,
+            issues=["Unknown or unauthorised requirement reference."],
+        )
+
+    # 4. Document type must be known
+    if analysis.detected_type is None:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=None,
+            detected_period=analysis.detected_period,
+            entity_match="unknown",
+            account_match=(
+                "unknown"
+                if requirement.scope.masked_account_identifier is not None
+                else None
+            ),
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=[
+                *analysis.uncertainty_reasons,
+                "Document type could not be determined.",
+            ],
+            evidence_refs=evidence_refs,
+            issues=["Document type requires human review."],
+        )
+
+    # 5. Explicit type mismatch
+    if analysis.detected_type != requirement.document_type:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_correction",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match="unknown",
+            account_match=(
+                "unknown"
+                if requirement.scope.masked_account_identifier is not None
+                else None
+            ),
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=analysis.uncertainty_reasons,
+            evidence_refs=evidence_refs,
+            issues=[
+                (
+                    f"Detected document type "
+                    f"{analysis.detected_type}; "
+                    f"{requirement.document_type} is required."
+                )
+            ],
+        )
+
+    # 6. Entity comparison
+    entity_match = _llm_match_result(
+        entities_match(
+            requirement.scope.entity_id,
+            analysis.entity_name,
+        )
+    )
+
+    # 7. Account comparison
+    #
+    # account_ref is deliberately NOT used here.
+    # It remains S1's stable internal account reference.
+    #
+    # S2 compares only the authorised masked identifier.
+    expected_account = requirement.scope.masked_account_identifier
+
+    if requirement.document_type == "bank_statement" and requirement.scope.account_ref is not None:
+        if expected_account is None:
+            account_match: MatchResult | None = "unknown"
+        else:
+            account_match = _llm_match_result(
+                accounts_match(expected_account, analysis.account_identifier)
+            )
+    else:
+        account_match = None
+    if expected_account is not None and account_match is None:
+        account_match = _llm_match_result(
+            accounts_match(
+                expected_account,
+                analysis.account_identifier,
+            )
+        )
+
+    # 8. Any material LLM uncertainty requires review
+    if analysis.uncertainty_reasons:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=analysis.uncertainty_reasons,
+            evidence_refs=evidence_refs,
+            issues=["Document analysis contains material uncertainty."],
+        )
+
+    # 9. Entity could not be verified
+    if entity_match == "unknown":
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=["Document entity could not be verified."],
+            evidence_refs=evidence_refs,
+            issues=["Entity verification requires human review."],
+        )
+
+    # 10. Clear entity mismatch
+    if entity_match == "mismatch":
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_correction",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=[],
+            evidence_refs=evidence_refs,
+            issues=["Document entity does not match the requirement."],
+        )
+
+    # 11. Account-scoped requirements:
+    #     mismatch and unknown both require human review.
+    if account_match in ("unknown", "mismatch"):
+        if account_match == "unknown":
+            reason = "Document account could not be verified."
+        else:
+            reason = "Document account differs from the " "expected masked identifier."
+
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=[reason],
+            evidence_refs=evidence_refs,
+            issues=["Account verification requires human review."],
+        )
+
+    # 12. Coverage-based completion rule
+    if requirement.completion_rule.kind == "coverage":
+        required_start = requirement.scope.coverage_start
+        required_end = requirement.scope.coverage_end
+
+        if analysis.coverage_start is None or analysis.coverage_end is None:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "Document coverage dates could not be determined."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Coverage cannot be verified automatically."],
+            )
+
+        if (
+            required_start is not None
+            and required_end is not None
+            and (
+                analysis.coverage_start > required_start
+                or analysis.coverage_end < required_end
+            )
+        ):
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_correction",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[],
+                evidence_refs=evidence_refs,
+                issues=[
+                    (
+                        f"Document covers "
+                        f"{analysis.coverage_start.isoformat()} "
+                        f"to {analysis.coverage_end.isoformat()}; "
+                        f"{required_start.isoformat()} "
+                        f"to {required_end.isoformat()} is required."
+                    )
+                ],
+            )
+
+    # 13. Explicit-item completion rule
+    if requirement.completion_rule.kind == "explicit_items":
+        expected_items = set(requirement.completion_rule.expected_item_refs)
+        matched_items = set(analysis.matched_item_refs)
+
+        # The LLM may never introduce an item outside the
+        # authorised candidate set.
+        if not matched_items.issubset(expected_items):
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "Document analysis returned an " "unauthorised item reference."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Matched item references require human review."],
+            )
+
+        if not matched_items:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=[],
+                uncertainty_reasons=[
+                    "No expected items could be verified " "in this document."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Expected-item matching requires human review."],
+            )
+
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=["Explicit-item document matches require human review."],
+            evidence_refs=evidence_refs,
+            issues=["Expected-item matching is not automatically accepted."],
+        )
+
+    # 14. Evidence gate
+    #
+    # A model assertion without traceable evidence must never
+    # create a satisfies finding.
+    if not evidence_refs:
+        return DocumentFinding(
+            finding_id=finding_id,
+            responsibility="document_assessment",
+            case_id=case.case_id,
+            input_state_version=case.state_version,
+            document_id=document_id,
+            requirement_id=requirement.requirement_id,
+            result="needs_review",
+            detected_type=analysis.detected_type,
+            detected_period=analysis.detected_period,
+            entity_match=entity_match,
+            account_match=account_match,
+            coverage_start=analysis.coverage_start,
+            coverage_end=analysis.coverage_end,
+            matched_item_refs=analysis.matched_item_refs,
+            uncertainty_reasons=["No valid document evidence was supplied."],
+            evidence_refs=[],
+            issues=["Evidence is required before satisfaction."],
+        )
+
+    # 15. All deterministic checks passed.
+    #
+    # This is still only an evidence proposal. DocumentStore
+    # remains responsible for application-layer revalidation
+    # before the Requirement can become accepted.
+    return DocumentFinding(
+        finding_id=finding_id,
+        responsibility="document_assessment",
+        case_id=case.case_id,
+        input_state_version=case.state_version,
+        document_id=document_id,
+        requirement_id=requirement.requirement_id,
+        result="satisfies",
+        detected_type=analysis.detected_type,
+        detected_period=analysis.detected_period,
+        entity_match=entity_match,
+        account_match=account_match,
+        coverage_start=analysis.coverage_start,
+        coverage_end=analysis.coverage_end,
+        matched_item_refs=analysis.matched_item_refs,
         uncertainty_reasons=[],
         evidence_refs=evidence_refs,
         issues=[],
