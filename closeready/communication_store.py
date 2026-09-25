@@ -1027,6 +1027,13 @@ class CommunicationStore:
             return []
         uploaded = []
         current = self.store.get_case(actor, case.case_id)
+        outstanding = [
+            requirement for requirement in current.requirements
+            if requirement.status not in ('accepted', 'waived')
+        ]
+        requirement_id = (
+            outstanding[0].requirement_id if len(outstanding) == 1 else None
+        )
         for index, attachment in enumerate(message.attachments):
             if not attachment.content or len(attachment.content) > MAX_INBOUND_DOCUMENT_BYTES:
                 with self.store.write() as conn:
@@ -1038,7 +1045,7 @@ class CommunicationStore:
                 continue
             try:
                 job = self.document_store.upload(
-                    actor, case.case_id, requirement_id=None,
+                    actor, case.case_id, requirement_id=requirement_id,
                     expected_state_version=current.state_version,
                     filename=attachment.filename, media_type='application/pdf',
                     content=attachment.content,

@@ -159,12 +159,36 @@ class TestDocumentIntelligenceCleanup:
         case = self.store.create_case(
             self.actor, CreateCaseRequest.model_validate(case_request()), "missing-mask-case"
         )
+        legacy_requirement = case.requirements[0].model_copy(update={
+            "scope": case.requirements[0].scope.model_copy(update={
+                "masked_account_identifier": None,
+            }),
+        })
+        case = case.model_copy(update={"requirements": [legacy_requirement]})
         finding = assess_llm_analysis(
             case=case, document_id="document", analysis=llm_bank_analysis(),
             requirement_id=case.requirements[0].requirement_id,
         )
         assert finding.account_match == "unknown"
         assert finding.result == "needs_review"
+
+    def test_llm_period_label_is_derived_from_structured_coverage(self):
+        case = self.create_case("period-normalization-case")
+        analysis = llm_bank_analysis().model_copy(update={
+            "detected_period": "01 July 2026 to 31 July 2026",
+            "uncertainty_codes": ["document_quality_problem"],
+            "uncertainty_reasons": ["Synthetic test document."],
+        })
+
+        finding = assess_llm_analysis(
+            case=case,
+            document_id="document",
+            analysis=analysis,
+            requirement_id=case.requirements[0].requirement_id,
+        )
+
+        assert finding.result == "needs_review"
+        assert finding.detected_period == "2026-07"
 
     def test_explicit_item_positive_result_needs_review(self):
         case = self.create_case(explicit=True)
@@ -206,7 +230,7 @@ class TestDocumentIntelligenceCleanup:
         assert self.documents.get_job(self.actor, case.case_id, job.job_id).status == "failed"
         assert self.store.get_case(self.actor, case.case_id).requirements[0].status == "missing"
 
-    def test_unbound_document_is_unmatched(self):
+    def test_unbound_document_with_one_candidate_is_bound_but_not_accepted(self):
         case = self.create_case()
         job = self.upload(case, None, key="unbound")
         processor = DocumentProcessor(
@@ -221,7 +245,11 @@ class TestDocumentIntelligenceCleanup:
         )
         result = self.worker(processor).run_once()
         assert result.status == "needs_review"
-        assert self.documents.get_finding(self.actor, case.case_id, job.document_id).result == "unmatched"
+        finding = self.documents.get_finding(
+            self.actor, case.case_id, job.document_id
+        )
+        assert finding.result == "needs_correction"
+        assert finding.requirement_id == case.requirements[0].requirement_id
         assert self.store.get_case(self.actor, case.case_id).requirements[0].status == "missing"
 
     def test_unbound_document_with_multiple_candidates_is_unmatched(self):

@@ -492,6 +492,82 @@ def _llm_match_result(value: bool | None) -> MatchResult:
     return "unknown"
 
 
+def _normalized_llm_period(analysis: LLMDocumentAnalysis) -> str | None:
+    if analysis.detected_period is not None and re.fullmatch(
+        r"\d{4}-(0[1-9]|1[0-2])",
+        analysis.detected_period,
+    ):
+        return analysis.detected_period
+
+    if (
+        analysis.coverage_start is not None
+        and analysis.coverage_end is not None
+        and analysis.coverage_start.year == analysis.coverage_end.year
+        and analysis.coverage_start.month == analysis.coverage_end.month
+    ):
+        return (
+            f"{analysis.coverage_start.year:04d}-"
+            f"{analysis.coverage_start.month:02d}"
+        )
+
+    return None
+
+
+def _material_uncertainty_reasons(
+    requirement: Requirement,
+    analysis: LLMDocumentAnalysis,
+    entity_match: MatchResult,
+    account_match: MatchResult | None,
+) -> list[str]:
+    """Keep only uncertainty that is unresolved for this Requirement.
+
+    Structured facts and application comparisons take precedence over model
+    prose. Reasons without codes are retained as a conservative compatibility
+    fallback for scripted or older callers.
+    """
+    if not analysis.uncertainty_reasons:
+        return []
+    codes = set(analysis.uncertainty_codes)
+    if not codes:
+        return list(analysis.uncertainty_reasons)
+
+    material = "document_quality_problem" in codes
+    material = material or (
+        "document_type_unclear" in codes
+        and analysis.detected_type != requirement.document_type
+    )
+    material = material or (
+        "entity_unclear" in codes and entity_match != "match"
+    )
+    material = material or (
+        "account_unclear" in codes
+        and requirement.document_type == "bank_statement"
+        and account_match != "match"
+    )
+    material = material or (
+        "period_unclear" in codes
+        and analysis.detected_period != requirement.accounting_period
+    )
+
+    if "coverage_unclear" in codes and requirement.completion_rule.kind == "coverage":
+        material = material or (
+            analysis.coverage_start is None
+            or analysis.coverage_end is None
+            or analysis.coverage_start > requirement.scope.coverage_start
+            or analysis.coverage_end < requirement.scope.coverage_end
+        )
+
+    if (
+        "item_reference_unclear" in codes
+        and requirement.completion_rule.kind == "explicit_items"
+    ):
+        matched = set(analysis.matched_item_refs)
+        expected = set(requirement.completion_rule.expected_item_refs)
+        material = material or not matched or not matched.issubset(expected)
+
+    return list(analysis.uncertainty_reasons) if material else []
+
+
 def assess_llm_analysis(
     *,
     case: CaseSnapshot,
@@ -501,6 +577,9 @@ def assess_llm_analysis(
     duplicate: bool = False,
 ) -> DocumentFinding:
     finding_id = f"finding_document_{uuid4().hex}"
+    analysis = analysis.model_copy(
+        update={"detected_period": _normalized_llm_period(analysis)}
+    )
 
     evidence_refs = [
         EvidenceRef(
@@ -680,8 +759,15 @@ def assess_llm_analysis(
             )
         )
 
-    # 8. Any material LLM uncertainty requires review
-    if analysis.uncertainty_reasons:
+    material_uncertainty = _material_uncertainty_reasons(
+        requirement,
+        analysis,
+        entity_match,
+        account_match,
+    )
+
+    # 8. Only unresolved, requirement-relevant uncertainty requires review.
+    if material_uncertainty:
         return DocumentFinding(
             finding_id=finding_id,
             responsibility="document_assessment",
@@ -697,7 +783,7 @@ def assess_llm_analysis(
             coverage_start=analysis.coverage_start,
             coverage_end=analysis.coverage_end,
             matched_item_refs=analysis.matched_item_refs,
-            uncertainty_reasons=analysis.uncertainty_reasons,
+            uncertainty_reasons=material_uncertainty,
             evidence_refs=evidence_refs,
             issues=["Document analysis contains material uncertainty."],
         )

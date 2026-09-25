@@ -65,7 +65,8 @@ function renderChecklist(requirements) {
       const accepted = r.status === 'accepted';
       const attention = ['missing', 'needs_clarification'].includes(r.status);
       const labels = {accepted:'Accepted', missing:'Missing — please submit', needs_clarification:'Correction needed', received:'Received — verification pending', awaiting_review:'Received — awaiting review', waived:'Waived — submission not required'};
-      return `<div class="checklist-item ${accepted ? 'complete' : attention ? 'attention' : 'pending'}"><span class="checkmark" aria-hidden="true">${accepted ? '✓' : ''}</span><div class="checklist-content"><div class="row-head"><b>${title}</b></div><div class="checklist-status">${esc(labels[r.status] || r.status)}</div><div class="detail">${esc(r.scope.entity_id)}${r.scope.account_ref ? ' · ' + esc(r.scope.account_ref) : ''} · ${esc(r.accounting_period)}</div>${r.description ? `<div class="detail">${esc(r.description)}</div>` : ''}${r.completion_rule?.expected_item_refs?.length ? `<div class="detail">Required items: ${r.completion_rule.expected_item_refs.map(esc).join(', ')}</div>` : ''}${r.scope.coverage_start ? `<div class="detail">Coverage: ${esc(r.scope.coverage_start)} to ${esc(r.scope.coverage_end)}</div>` : ''}<div class="detail">Reviewer: ${esc(r.reviewer_status)} · Evidence: ${r.evidence_refs.length ? r.evidence_refs.map(x => esc(x.document_id || x.ref || JSON.stringify(x))).join(', ') : 'none'}</div>${evidenceDetails(r.evidence_refs)}</div></div>`;
+      const accountLabel=r.scope.masked_account_identifier;
+      return `<div class="checklist-item ${accepted ? 'complete' : attention ? 'attention' : 'pending'}"><span class="checkmark" aria-hidden="true">${accepted ? '✓' : ''}</span><div class="checklist-content"><div class="row-head"><b>${title}</b></div><div class="checklist-status">${esc(labels[r.status] || r.status)}</div><div class="detail">${esc(r.scope.entity_id)}${accountLabel ? ' · account ' + esc(accountLabel) : ''} · ${esc(r.accounting_period)}</div>${r.description ? `<div class="detail">${esc(r.description)}</div>` : ''}${r.completion_rule?.expected_item_refs?.length ? `<div class="detail">Required items: ${r.completion_rule.expected_item_refs.map(esc).join(', ')}</div>` : ''}${r.scope.coverage_start ? `<div class="detail">Coverage: ${esc(r.scope.coverage_start)} to ${esc(r.scope.coverage_end)}</div>` : ''}<div class="detail">Reviewer: ${esc(r.reviewer_status)} · Evidence: ${r.evidence_refs.length ? r.evidence_refs.map(x => esc(x.document_id || x.ref || JSON.stringify(x))).join(', ') : 'none'}</div>${evidenceDetails(r.evidence_refs)}</div></div>`;
     }).join('');
   }).join('');
 }
@@ -78,11 +79,23 @@ function render(){const {caseData:c,reviews,outbox,audit,findings,commitments,re
  <div class="panel"><h2>Client follow-up</h2><button id="new-reply">Record sandbox reply</button><div class="row"><h3>Replies</h3>${replies.map(r=>`<div class="row"><div class="row-head"><b>${esc(r.sender_contact_id)}</b><small>${when(r.received_at)}</small></div><pre>${esc(r.body)}</pre><button class="secondary" data-assess="${esc(r.reply_id)}">Assess reply</button></div>`).join('')||'<p class="muted">No replies.</p>'}</div><div class="row"><h3>Commitments</h3>${commitments.map(x=>`<div class="detail">${pill(x.status)} ${esc(x.requirement_id)} · promised ${when(x.promised_at)}</div>`).join('')||'<p class="muted">None.</p>'}</div><div class="row"><h3>Reminders</h3>${reminders.map(x=>`<div class="detail">${pill(x.status)} ${esc(x.requirement_ids.join(', '))} · ${when(x.scheduled_at)}</div>${reminderActions(x)}`).join('')||'<p class="muted">None.</p>'}</div><button id="dispatch" class="secondary">Dispatch due sandbox reminders</button></div>
  <div class="panel"><h2>Sandbox mailbox</h2>${Array.isArray(mailbox.items)?mailbox.items.map(m=>`<div class="row"><div class="row-head"><b>${esc(m.subject)}</b>${pill(m.source)}</div><div class="detail">To ${esc(m.to_email)} · ${when(m.sent_at)} · ${m.live?'live delivery':'simulated delivery'}</div></div>`).join('')||'<p class="muted">Empty.</p>':`<p class="muted">${esc(mailbox.error)}</p>`}</div>
  <div class="panel"><h2>Findings</h2>${findings.map(f=>`<div class="row"><div class="detail">${esc(f.finding_id || 'Reply assessment')} · ${esc(f.result || f.intent || '')}</div><pre>${esc(JSON.stringify(f,null,2))}</pre></div>`).join('')||'<p class="muted">No findings.</p>'}</div>
- <div class="panel wide"><h2>Run traces</h2>${runs.map(r=>r.load_error?`<p class="muted">${esc(r.run_id)}: ${esc(r.load_error)}</p>`:`<div class="row"><div class="row-head"><b>${esc(r.run_id)}</b>${pill(r.status)}</div><div class="detail">Mode ${esc(r.run_mode)} · ${esc(r.provider)} / ${esc(r.model)} · ${r.live?'live inference':'scripted inference'} · start version ${r.start_state_version} · ${when(r.started_at)}</div>${r.traces.map(t=>`<div class="detail">Step ${t.step}: ${esc(t.tool_names.join(', ') || 'model response')} · ${t.latency_ms} ms · tokens ${esc(t.usage?.total_tokens ?? 'not reported')} · ${esc(t.outcomes.join(', '))}${t.error_code?' · '+esc(t.error_code):''}</div>`).join('')}</div>`).join('')||'<p class="muted">No case analysis runs.</p>'}</div><div class="panel wide"><h2>Audit timeline</h2>${audit.slice().reverse().map(a=>`<div class="row"><div class="row-head"><b>${esc(a.action)}</b>${pill(a.outcome)}</div><div class="detail">${when(a.occurred_at)} · actor ${esc(a.actor_user_id)} · run ${esc(a.run_id || '—')} · state ${esc(a.old_state_version ?? '—')} → ${esc(a.new_state_version ?? '—')} · policy ${esc(a.policy_id)} v${esc(a.policy_version)}</div><div class="detail">${esc(a.reason)}</div></div>`).join('')||'<p class="muted">No audit events.</p>'}</div></div>`;
+ <div class="panel wide"><h2>Run traces</h2>${runs.map(r=>r.load_error?`<p class="muted">${esc(r.run_id)}: ${esc(r.load_error)}</p>`:`<div class="row"><div class="row-head"><b>${esc(r.run_id)}</b>${pill(r.status)}</div><div class="detail">Mode ${esc(r.run_mode)} · ${esc(r.provider)} / ${esc(r.model)} · ${r.live?'live inference':'scripted inference'} · start version ${r.start_state_version} · ${when(r.started_at)}</div>${r.traces.map(t=>`<div class="detail">Step ${t.step}: ${esc(t.tool_names.join(', ') || 'model response')} · ${t.latency_ms} ms · tokens ${esc(t.usage?.total_tokens ?? 'not reported')} · ${esc(t.outcomes.join(', '))}${t.error_code?' · '+esc(t.error_code):''}</div>`).join('')}</div>`).join('')||'<p class="muted">No case analysis runs.</p>'}</div><div class="panel wide"><h2>Audit timeline</h2>${audit.slice().reverse().map(a=>`<div class="row"><div class="row-head"><b>${auditActionLabel(a)}</b>${pill(a.outcome)}</div><div class="detail">${when(a.occurred_at)} · actor ${esc(a.actor_user_id)} · run ${esc(a.run_id || '—')} · state ${esc(a.old_state_version ?? '—')} → ${esc(a.new_state_version ?? '—')} · policy ${esc(a.policy_id)} v${esc(a.policy_version)}</div><div class="detail">${esc(a.reason)}</div></div>`).join('')||'<p class="muted">No audit events.</p>'}</div></div>`;
+}
+function auditActionLabel(event){
+  const labels={reject_document:'Document rejected',accept_document_evidence:'Document evidence accepted',reassign_document_processing:'Document reassigned for processing',prepare_document_correction:'Correction email requested',bind_document_requirement:'Document matched to requirement'};
+  const label=labels[event.action] || event.action;
+  const filename=event.details?.document_filename;
+  return esc(label)+(filename?` · ${esc(filename)}`:'');
 }
 function resetView(){
   clearTimeout(state.timer);state.generation++;state.selected=null;state.data=null;state.pending=null;
   $('cases').innerHTML='';$('workspace').innerHTML='<div class="empty">Select a case.</div>';
+}
+async function connectSession(){
+  resetView();
+  state.token=$('token').value.trim();
+  sessionStorage.setItem('closeready_token',state.token);
+  await loadCases();
 }
 async function mutation(path,body,method='POST'){
   if(state.busy)return;
@@ -109,23 +122,53 @@ async function mutation(path,body,method='POST'){
   }
   return result;
 }
-function promptFields(title,fields){
+function promptFormMarkup(fields){
+  return `<form>${fields.map(f=>{
+    const attrs=`id="f-${esc(f.name)}" name="${esc(f.name)}" ${f.optional?'':'required'}`;
+    const input=f.options ? `<select ${attrs}>${f.options.map(o=>`<option value="${esc(o.value)}" ${o.value===f.value?'selected':''}>${esc(o.label)}</option>`).join('')}</select>` : f.multiline ? `<textarea ${attrs}>${esc(f.value||'')}</textarea>` : `<input ${attrs} type="${f.type||'text'}" ${f.type==='file'?'accept="application/pdf,.pdf"':`value="${esc(f.value||'')}"`}>`;
+    return `<div class="form-field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${input}${f.help?`<div class="field-help">${esc(f.help)}</div>`:''}<div class="field-error" data-field-error="${esc(f.name)}" role="alert" hidden></div></div>`;
+  }).join('')}<div class="form-error" data-form-error role="alert" hidden></div><menu><button type="button" data-dialog-cancel class="secondary">Cancel</button><button type="submit">Continue</button></menu></form>`;
+}
+function showPromptErrors(form,errors){
+  form.querySelectorAll('[data-field-error]').forEach(node=>{node.textContent='';node.hidden=true});
+  form.querySelectorAll('[aria-invalid="true"]').forEach(node=>node.removeAttribute('aria-invalid'));
+  const formError=form.querySelector('[data-form-error]');
+  if(formError){formError.textContent='';formError.hidden=true}
+  let firstInvalid=null;
+  for(const [field,message] of Object.entries(errors || {})){
+    const errorNode=field==='_form'?formError:form.querySelector(`[data-field-error="${field}"]`);
+    if(errorNode){errorNode.textContent=message;errorNode.hidden=false}
+    if(field!=='_form'){
+      const input=form.querySelector(`[name="${field}"]`);
+      if(input){input.setAttribute('aria-invalid','true');firstInvalid ||= input}
+    }
+  }
+  firstInvalid?.focus();
+}
+function promptFields(title,fields,{validate}={}){
   return new Promise(resolve=>{
     const d=document.createElement('dialog');d.setAttribute('aria-label',title);
-    d.innerHTML=`<h2>${esc(title)}</h2><form method="dialog">${fields.map(f=>{
-      const attrs=`id="f-${esc(f.name)}" name="${esc(f.name)}" ${f.optional?'':'required'}`;
-      const input=f.options ? `<select ${attrs}>${f.options.map(o=>`<option value="${esc(o.value)}" ${o.value===f.value?'selected':''}>${esc(o.label)}</option>`).join('')}</select>` : f.multiline ? `<textarea ${attrs}>${esc(f.value||'')}</textarea>` : `<input ${attrs} type="${f.type||'text'}" ${f.type==='file'?'accept="application/pdf,.pdf"':`value="${esc(f.value||'')}"`}>`;
-      return `<label for="f-${esc(f.name)}">${esc(f.label)}</label>${input}`;
-    }).join('')}<menu><button type="submit" value="cancel" class="secondary" formnovalidate>Cancel</button><button type="submit" value="ok">Continue</button></menu></form>`;
+    d.innerHTML=`<h2>${esc(title)}</h2>${promptFormMarkup(fields)}`;
     document.body.append(d);
-    d.addEventListener('close',()=>{const values=d.returnValue==='ok'?Object.fromEntries(new FormData(d.querySelector('form'))):null;d.remove();resolve(values);},{once:true});
+    const form=d.querySelector('form');
+    let submittedValues=null;
+    form.addEventListener('submit',event=>{
+      event.preventDefault();
+      const values=Object.fromEntries(new FormData(form));
+      let errors={};
+      try{errors=validate?.(values)||{}}catch(error){errors={_form:error.message}}
+      if(Object.keys(errors).length){showPromptErrors(form,errors);return}
+      submittedValues=values;d.close('ok');
+    });
+    d.querySelector('[data-dialog-cancel]').addEventListener('click',()=>d.close('cancel'));
+    d.addEventListener('close',()=>{const values=d.returnValue==='ok'?submittedValues:null;d.remove();resolve(values);},{once:true});
     d.showModal();
   });
 }
+$('session').addEventListener('submit',async event=>{event.preventDefault();await connectSession()});
 document.addEventListener('click',async e=>{const target=e.target instanceof Element ? e.target.closest('button') : null;if(!target)return;
  if(state.busy)return;
  if(target.id==='new-case'){try{await createCaseForm();}catch(error){notice(error.message)}return;}
- if(target.id==='connect'){resetView();state.token=$('token').value.trim();sessionStorage.setItem('closeready_token',state.token);await loadCases();return}
  if(target.id==='disconnect'){resetView();state.token='';sessionStorage.removeItem('closeready_token');$('token').value='';$('cases').innerHTML='';$('workspace').innerHTML='<div class="empty">Disconnected.</div>';return}
  if(target.id==='refresh'){await loadCases();if(state.selected)await loadCase(state.selected);return}
  if(target.dataset.case){await loadCase(target.dataset.case);return}
@@ -157,6 +200,24 @@ function evidenceDetails(refs){
   if(!refs?.length)return '';
   return `<details><summary>View evidence (${refs.length})</summary>${refs.map(ref=>`<div class="detail">${esc(ref.document_id)} · page ${esc(ref.page)}<blockquote>${esc(ref.excerpt || ref.quote || ref.text || JSON.stringify(ref))}</blockquote></div>`).join('')}</details>`;
 }
+async function loadDocumentPdf(path){
+  const response=await fetch(`/api/v1${path}/content`,{
+    headers:{Authorization:`Bearer ${state.token}`}
+  });
+  if(!response.ok){
+    let result={};try{result=await response.json()}catch{}
+    const error=Error(`${result.error?.code || response.status}: ${result.error?.message || 'Original PDF could not be loaded'}`);
+    error.status=response.status;throw error;
+  }
+  return URL.createObjectURL(await response.blob());
+}
+function documentPreviewMarkup(url){
+  return `<div class="document-preview-actions"><a class="pdf-link" href="${esc(url)}" target="_blank" rel="noopener">Open original PDF in new tab</a></div><iframe class="document-preview" title="Original uploaded PDF" src="${esc(url)}"></iframe>`;
+}
+function shouldOpenDocumentDecision(returnValue){return returnValue==='decide'}
+function evidenceDialogActionsMarkup(){
+  return `<form method="dialog"><menu><button type="submit" value="close" class="secondary">Close</button><button type="submit" value="decide">Make decision</button></menu></form>`;
+}
 function renderOverview(){
   const {caseData:c,reviews,documents,commitments,reminders,reference}=state.data;
   const missing=c.requirements.filter(r=>!['accepted','waived'].includes(r.status));
@@ -169,16 +230,36 @@ function renderOverview(){
 }
 function renderDocuments(){
   const {documents,caseData:c}=state.data;
-  const requirementName=id=>{const r=c.requirements.find(x=>x.requirement_id===id);return r?`${r.document_type.replaceAll('_',' ')} · ${r.scope.account_ref || r.scope.entity_id}`:'Not assigned';};
+  const requirementName=id=>{const r=c.requirements.find(x=>x.requirement_id===id);return r?`${r.document_type.replaceAll('_',' ')} · ${r.scope.masked_account_identifier || r.scope.entity_id}`:'Not assigned';};
   return `<div class="panel wide"><div class="row-head"><h2>Documents & evidence</h2><button data-flow="upload">Upload PDF</button></div><p class="muted">Text-based PDF, up to 5 MiB. Scans need human review; OCR is not available.</p>${documents.map(d=>`<div class="row"><div class="row-head"><b>${esc(d.original_filename)}</b>${pill(d.status)}</div><div class="detail">${esc(requirementName(d.requirement_id))} · ${when(d.created_at)} · ${(d.size_bytes/1024).toFixed(1)} KB${d.duplicate_of_document_id?' · Duplicate upload':''}</div><div class="actions">${!['queued','processing'].includes(d.status)?`<button class="secondary" data-flow="evidence" data-document="${esc(d.document_id)}">View finding & review history</button>`:'<span class="muted">Waiting for the document worker. This page refreshes automatically.</span>'}${d.status==='needs_review'?`<button data-flow="doc-review" data-document="${esc(d.document_id)}">Review document</button>`:''}</div></div>`).join('')||'<p class="muted">No documents yet. Upload evidence for an outstanding requirement.</p>'}</div>`;
 }
-function requirementsOptions(){return state.data.caseData.requirements.map(r=>({value:r.requirement_id,label:`${r.document_type.replaceAll('_',' ')} · ${r.scope.account_ref||r.scope.entity_id} · ${r.status}`}));}
+function requirementsOptions(){return state.data.caseData.requirements.map(r=>({value:r.requirement_id,label:`${r.document_type.replaceAll('_',' ')} · ${r.scope.masked_account_identifier||r.scope.entity_id} · ${r.status}`}));}
+function documentReviewBody(version,values){
+  const rejected=values.decision==='reject_document';
+  return {expected_state_version:version,decision:values.decision,
+    target_requirement_id:rejected?null:values.target,reason:values.reason,
+    prepare_correction_email:rejected && values.follow_up==='prepare'};
+}
 async function showEvidence(base,documentId){
   const path=base+'/documents/'+encodeURIComponent(documentId);
-  const [finding,history]=await Promise.all([api(path+'/finding'),pages(path+'/review-decisions')]);
+  const [finding,history,preview]=await Promise.all([
+    api(path+'/finding'),
+    pages(path+'/review-decisions'),
+    loadDocumentPdf(path).then(url=>({url})).catch(error=>({error:error.message}))
+  ]);
   const d=document.createElement('dialog');d.setAttribute('aria-label','Document evidence');
-  d.innerHTML=`<h2>Document evidence</h2>${pill(finding.result)}<p>Detected: ${esc(finding.detected_type || 'Unknown')} · ${esc(finding.detected_period || 'Unknown period')}</p><p>Entity: ${esc(finding.entity_match)} · Account: ${esc(finding.account_match || 'Not applicable')}</p><p>Coverage: ${esc(finding.coverage_start||'—')} to ${esc(finding.coverage_end||'—')}</p><h3>Issues and uncertainty</h3><p>${[...finding.issues,...finding.uncertainty_reasons].map(esc).join('<br>')||'None reported.'}</p>${evidenceDetails(finding.evidence_refs)}<h3>Review history</h3>${history.map(h=>`<p>${esc(h.decision)} · ${esc(h.reviewer_user_id)} · ${when(h.decided_at)}<br>${esc(h.reason)}</p>`).join('')||'<p>No human decision recorded.</p>'}<form method="dialog"><button>Close</button></form>`;
-  document.body.append(d);d.addEventListener('close',()=>d.remove(),{once:true});d.showModal();
+  d.className='evidence-dialog';
+  const original=preview.url?documentPreviewMarkup(preview.url):`<p class="preview-error" role="alert">Original PDF unavailable: ${esc(preview.error)}</p>`;
+  d.innerHTML=`<h2>Document evidence</h2>${original}<section class="finding-summary"><h3>Automated finding</h3>${pill(finding.result)}<p>Detected: ${esc(finding.detected_type || 'Unknown')} · ${esc(finding.detected_period || 'Unknown period')}</p><p>Entity: ${esc(finding.entity_match)} · Account: ${esc(finding.account_match || 'Not applicable')}</p><p>Coverage: ${esc(finding.coverage_start||'—')} to ${esc(finding.coverage_end||'—')}</p><h3>Issues and uncertainty</h3><p>${[...finding.issues,...finding.uncertainty_reasons].map(esc).join('<br>')||'None reported.'}</p>${evidenceDetails(finding.evidence_refs)}<h3>Review history</h3>${history.map(h=>`<p>${esc(h.decision)} · ${esc(h.reviewer_user_id)} · ${when(h.decided_at)}<br>${esc(h.reason)}</p>`).join('')||'<p>No human decision recorded.</p>'}</section>${evidenceDialogActionsMarkup()}`;
+  document.body.append(d);
+  return new Promise(resolve=>{
+    d.addEventListener('close',()=>{
+      const proceed=shouldOpenDocumentDecision(d.returnValue);
+      if(preview.url)URL.revokeObjectURL(preview.url);
+      d.remove();resolve(proceed);
+    },{once:true});
+    d.showModal();
+  });
 }
 document.addEventListener('click',async event=>{
   const button=event.target instanceof Element?event.target.closest('[data-flow]'):null;
@@ -199,15 +280,14 @@ document.addEventListener('click',async event=>{
         await mutation(base+'/documents',body);break;
       }
       case 'doc-review': {
-        await showEvidence(base,button.dataset.document);
-        // Keep evidence on screen for the reviewer; choose a decision after closing it.
-        const evidenceDialog=document.querySelector('dialog');
-        await new Promise(resolve=>evidenceDialog.addEventListener('close',resolve,{once:true}));
+        const proceed=await showEvidence(base,button.dataset.document);
+        if(!proceed)break;
         const values=await promptFields('Review document',[
           {name:'decision',label:'Decision',options:[{value:'accept_for_requirement',label:'Accept evidence for requirement'},{value:'reassign_for_processing',label:'Reassign and process again'},{value:'reject_document',label:'Reject document'}]},
           {name:'target',label:'Target requirement (ignored when rejecting)',options:requirementsOptions()},
+          {name:'follow_up',label:'After rejection',options:[{value:'none',label:'Reject only'},{value:'prepare',label:'Reject and prepare correction email'}]},
           {name:'reason',label:'Review reason',multiline:true}]);
-        if(values)await mutation(base+'/documents/'+encodeURIComponent(button.dataset.document)+'/review-decisions',{expected_state_version:version,decision:values.decision,target_requirement_id:values.decision==='reject_document'?null:values.target,reason:values.reason});
+        if(values)await mutation(base+'/documents/'+encodeURIComponent(button.dataset.document)+'/review-decisions',documentReviewBody(version,values));
         break;
       }
       case 'evidence':await showEvidence(base,button.dataset.document);break;
@@ -241,6 +321,45 @@ function scheduleCaseRefresh(id){
   },3000);
 }
 
+function commaSeparated(value){
+  return [...new Set(String(value || '').split(',').map(x=>x.trim()).filter(Boolean))];
+}
+
+function caseFormError(field,message){
+  const error=Error(message);error.field=field;return error;
+}
+
+function buildCaseRequirements(values){
+  const requirements=[];
+  const [year,month]=values.period.split('-').map(Number);
+  const scope={entity_id:values.entity,account_ref:null,coverage_start:null,coverage_end:null};
+  const bankAccounts=commaSeparated(values.bank_accounts).map(value=>{
+    const match=value.match(/^(?:([A-Za-z0-9 _-]{1,80}):)?(\d{4})$/);
+    if(!match)throw caseFormError('bank_accounts','Each bank account entry must be four digits or a label followed by four digits, for example operating:1234.');
+    return {accountRef:(match[1]||`bank_account_${match[2]}`).trim(),suffix:match[2]};
+  });
+  if(new Set(bankAccounts.map(item=>item.accountRef.toLowerCase())).size!==bankAccounts.length)throw caseFormError('bank_accounts','Bank account labels must be unique within the case.');
+  for(const {accountRef,suffix} of bankAccounts){
+    requirements.push({
+      document_type:'bank_statement',accounting_period:values.period,
+      scope:{...scope,account_ref:accountRef,masked_account_identifier:`****${suffix}`,coverage_start:values.period+'-01',coverage_end:values.period+'-'+new Date(Date.UTC(year,month,0)).getUTCDate()},
+      completion_rule:{kind:'coverage',expected_item_refs:[],allow_multiple_documents:true}
+    });
+  }
+  for(const [field,type] of [['invoices','invoice'],['receipts','receipt'],['other_refs','other_supporting_document']]){
+    const refs=commaSeparated(values[field]);
+    if(refs.length)requirements.push({document_type:type,accounting_period:values.period,scope,completion_rule:{kind:'explicit_items',expected_item_refs:refs,allow_multiple_documents:true},...(type==='other_supporting_document'?{description:values.other}:{})});
+  }
+  if(!requirements.length)throw caseFormError('_form','Configure at least one bank account or required item reference.');
+  if(String(values.other_refs || '').trim()&&!String(values.other || '').trim())throw caseFormError('other','Other supporting documents need a description.');
+  return requirements;
+}
+
+function caseFormErrors(values){
+  try{buildCaseRequirements(values);return {}}
+  catch(error){return {[error.field || '_form']:error.message}}
+}
+
 async function createCaseForm(){
   if(!state.token){notice('Connect before creating a case.');return;}
   const values=await promptFields('Create client-period checklist',[
@@ -249,23 +368,14 @@ async function createCaseForm(){
     {name:'timezone',label:'Business timezone',value:Intl.DateTimeFormat().resolvedOptions().timeZone},
     {name:'due',label:'Deadline (your local time)',type:'datetime-local'},
     {name:'entity',label:'Entity ID'},
-    {name:'account',label:'Bank account reference (leave blank if not required)',optional:true},
+    {name:'bank_accounts',label:'Bank accounts',help:'Required only when collecting bank statements. Enter the final four digits, for example 1234, or a label and final four digits, for example operating:1234. Separate multiple accounts with commas.',optional:true},
     {name:'invoices',label:'Required invoice references, comma-separated (optional)',optional:true},
     {name:'receipts',label:'Required receipt references, comma-separated (optional)',optional:true},
     {name:'other',label:'Other supporting document description (optional)',optional:true},
     {name:'other_refs',label:'Required references for other documents (optional)',optional:true},
-  ]);
+  ],{validate:caseFormErrors});
   if(!values)return;
-  const requirements=[];
-  const [year,month]=values.period.split('-').map(Number);
-  const scope={entity_id:values.entity,account_ref:null,coverage_start:null,coverage_end:null};
-  if(values.account.trim())requirements.push({document_type:'bank_statement',accounting_period:values.period,scope:{...scope,account_ref:values.account.trim(),coverage_start:values.period+'-01',coverage_end:values.period+'-'+new Date(Date.UTC(year,month,0)).getUTCDate()},completion_rule:{kind:'coverage',expected_item_refs:[],allow_multiple_documents:true}});
-  for(const [field,type] of [['invoices','invoice'],['receipts','receipt'],['other_refs','other_supporting_document']]){
-    const refs=[...new Set(values[field].split(',').map(x=>x.trim()).filter(Boolean))];
-    if(refs.length)requirements.push({document_type:type,accounting_period:values.period,scope,completion_rule:{kind:'explicit_items',expected_item_refs:refs,allow_multiple_documents:true},...(type==='other_supporting_document'?{description:values.other}:{})});
-  }
-  if(!requirements.length)throw Error('Configure at least one bank account or required item reference.');
-  if(values.other_refs.trim()&&!values.other.trim())throw Error('Other supporting documents need a description.');
+  const requirements=buildCaseRequirements(values);
   const created=await mutation('/cases',{client_id:values.client,owner_user_id:values.owner,policy_id:values.policy,accounting_period:values.period,timezone:values.timezone,due_at:new Date(values.due).toISOString(),requirements});
   if(created)await loadCase(created.case_id);
 }

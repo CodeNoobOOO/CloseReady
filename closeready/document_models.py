@@ -94,6 +94,7 @@ class DocumentReviewDecisionRequest(ContractModel):
     decision: DocumentReviewDecision
     target_requirement_id: Text | None = None
     reason: Annotated[Text, Field(max_length=2000)]
+    prepare_correction_email: bool = False
 
     @model_validator(mode="after")
     def decision_has_required_target(self):
@@ -101,6 +102,8 @@ class DocumentReviewDecisionRequest(ContractModel):
             raise ValueError("Rejected documents cannot target a requirement")
         if self.decision != "reject_document" and self.target_requirement_id is None:
             raise ValueError("This decision requires a target requirement")
+        if self.decision != "reject_document" and self.prepare_correction_email:
+            raise ValueError("Only a rejected document can prepare a correction email")
         return self
 
 
@@ -117,6 +120,7 @@ class DocumentReviewDecisionRecord(ContractModel):
     resulting_state_version: PositiveInt
     document_status: DocumentStatus
     source_finding: "DocumentFinding"
+    follow_up_run_id: Text | None = None
 
 
 class DocumentReviewDecisionPage(ContractModel):

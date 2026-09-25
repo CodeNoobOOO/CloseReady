@@ -1,4 +1,5 @@
 """Business-boundary tests with real transactions in temporary SQLite files."""
+import copy
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -103,6 +104,48 @@ class CaseApiTests(unittest.TestCase):
         self.assertEqual(case['policy_version'], 1)
         got = self.client.get('/api/v1/cases/' + case['case_id'], headers=self.headers)
         self.assertEqual(got.json(), case)
+
+    def test_create_bank_requirement_requires_account_suffix(self):
+        payload = case_request()
+        payload['requirements'][0]['scope'].pop('masked_account_identifier', None)
+
+        response = self.client.post(
+            '/api/v1/cases', json=payload, headers=self.headers)
+
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_create_bank_requirement_requires_internal_account_reference(self):
+        payload = case_request()
+        payload['requirements'][0]['scope']['account_ref'] = None
+
+        response = self.client.post(
+            '/api/v1/cases', json=payload, headers=self.headers)
+
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_create_bank_requirement_normalizes_four_digit_account_suffix(self):
+        payload = case_request()
+        payload['requirements'][0]['scope']['masked_account_identifier'] = '1234'
+
+        response = self.client.post(
+            '/api/v1/cases', json=payload, headers=self.headers)
+
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(
+            response.json()['requirements'][0]['scope']['masked_account_identifier'],
+            '****1234',
+        )
+
+    def test_create_case_rejects_duplicate_internal_bank_account_references(self):
+        payload = case_request()
+        second = copy.deepcopy(payload['requirements'][0])
+        second['scope']['masked_account_identifier'] = '****5678'
+        payload['requirements'].append(second)
+
+        response = self.client.post(
+            '/api/v1/cases', json=payload, headers=self.headers)
+
+        self.assertEqual(response.status_code, 422, response.text)
 
     def test_manager_confirms_computed_readiness_with_audited_idempotent_transition(self):
         case = self.mark_ready_for_confirmation(self.create())
@@ -304,14 +347,20 @@ class CaseApiTests(unittest.TestCase):
         self.assertEqual(sorted(results), [200, 409])
 
     def test_list_pagination_and_input_errors(self):
-        self.create()
-        self.headers['Idempotency-Key'] = 'create-2'
-        self.create()
+        fixed_ids = [
+            type('FixedUuid', (), {'hex': value})()
+            for value in ('0' * 32, '1' * 32, 'f' * 32, 'e' * 32)
+        ]
+        with patch('closeready.store.uuid4', side_effect=fixed_ids):
+            older = self.create()
+            self.headers['Idempotency-Key'] = 'create-2'
+            newer = self.create()
         first = self.client.get('/api/v1/cases?limit=1', headers=self.headers).json()
         second = self.client.get('/api/v1/cases', params={'limit': 1, 'cursor': first['next_cursor']}, headers=self.headers).json()
         self.assertEqual(len(first['items']), 1)
         self.assertEqual(len(second['items']), 1)
-        self.assertNotEqual(first['items'][0]['case_id'], second['items'][0]['case_id'])
+        self.assertEqual(first['items'][0]['case_id'], newer['case_id'])
+        self.assertEqual(second['items'][0]['case_id'], older['case_id'])
         self.assertIsNone(second['next_cursor'])
         self.assertEqual(self.client.get('/api/v1/cases?limit=1001', headers=self.headers).status_code, 422)
         missing_key = self.client.post('/api/v1/cases', headers={'Authorization': 'Bearer ' + TOKEN}, json=case_request())

@@ -1,4 +1,5 @@
 """Public requests omit IDs, approvals and state owned by the server."""
+import re
 from typing import Annotated
 from pydantic import Field, model_validator
 from .models import (
@@ -14,8 +15,34 @@ class RequirementDefinition(ContractModel):
     completion_rule: CompletionRule
     description: Text | None = None
 
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_bank_account_suffix(cls, value):
+        if not isinstance(value, dict) or value.get('document_type') != 'bank_statement':
+            return value
+        scope = value.get('scope')
+        if not isinstance(scope, dict):
+            return value
+        supplied = scope.get('masked_account_identifier')
+        if isinstance(supplied, str) and re.fullmatch(r'\d{4}', supplied.strip()):
+            normalized = dict(value)
+            normalized_scope = dict(scope)
+            normalized_scope['masked_account_identifier'] = '****' + supplied.strip()
+            normalized['scope'] = normalized_scope
+            return normalized
+        return value
+
     @model_validator(mode='after')
     def validate_configuration(self):
+        if self.document_type == 'bank_statement':
+            if not self.scope.account_ref:
+                raise ValueError(
+                    'Bank statement requirements need a case-local account reference')
+            masked = self.scope.masked_account_identifier
+            if not isinstance(masked, str) or not re.fullmatch(r'\*{4}\d{4}', masked):
+                raise ValueError(
+                    'Bank statement requirements need a masked account identifier '
+                    'containing only the final four digits')
         self.to_requirement('validation-only')
         return self
 
@@ -38,6 +65,13 @@ class CreateCaseRequest(ContractModel):
     def same_period(self):
         if any(r.accounting_period != self.accounting_period for r in self.requirements):
             raise ValueError('Requirement period must match the case')
+        bank_refs = [
+            r.scope.account_ref.casefold()
+            for r in self.requirements
+            if r.document_type == 'bank_statement' and r.scope.account_ref is not None
+        ]
+        if len(bank_refs) != len(set(bank_refs)):
+            raise ValueError('Bank account references must be unique within the case')
         return self
 
 
@@ -76,6 +110,7 @@ class AuditEvent(ContractModel):
     new_state_version: PositiveInt | None
     policy_id: Text | None
     policy_version: PositiveInt | None
+    details: dict[str, str | list[str] | None] = Field(default_factory=dict)
 
 
 class AuditPage(ContractModel):

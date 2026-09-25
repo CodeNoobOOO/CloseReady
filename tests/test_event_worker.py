@@ -54,6 +54,7 @@ def case_request():
             'scope': {
                 'entity_id': 'entity_demo',
                 'account_ref': 'account_demo',
+                'masked_account_identifier': '****1234',
                 'coverage_start': '2026-07-01',
                 'coverage_end': '2026-07-31',
             },

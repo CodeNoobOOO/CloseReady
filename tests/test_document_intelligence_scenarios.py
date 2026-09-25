@@ -31,6 +31,7 @@ def make_analysis(
     coverage_start=date(2026, 7, 1),
     coverage_end=date(2026, 7, 31),
     evidence=None,
+    uncertainty_codes=None,
     uncertainty_reasons=None,
 ):
     return LLMDocumentAnalysis(
@@ -40,6 +41,10 @@ def make_analysis(
         detected_period="2026-07",
         coverage_start=coverage_start,
         coverage_end=coverage_end,
+        uncertainty_codes=(
+            uncertainty_codes
+            or (["document_quality_problem"] if uncertainty_reasons else [])
+        ),
         uncertainty_reasons=uncertainty_reasons or [],
         evidence=evidence or [],
     )
@@ -417,6 +422,7 @@ DOCUMENT_TYPE_SCENARIOS = [
             invoice_date=date(2026, 7, 15),
             currency="SGD",
             total_amount="1250.00",
+            uncertainty_codes=["item_reference_unclear"],
             uncertainty_reasons=["Invoice number could not be determined."],
         ),
         "invoice",
@@ -453,6 +459,7 @@ DOCUMENT_TYPE_SCENARIOS = [
             transaction_date=None,
             currency="SGD",
             amount="18.90",
+            uncertainty_codes=["period_unclear"],
             uncertainty_reasons=["Transaction date is not visible."],
         ),
         "receipt",
@@ -480,6 +487,7 @@ DOCUMENT_TYPE_SCENARIOS = [
             detected_type="other_supporting_document",
             entity_name="entity_demo",
             purpose=None,
+            uncertainty_codes=["document_quality_problem"],
             uncertainty_reasons=["Document purpose could not be determined."],
         ),
         "other_supporting_document",

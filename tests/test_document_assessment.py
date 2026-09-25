@@ -365,6 +365,54 @@ def test_llm_analysis_satisfies_fully_verified_bank_statement():
     assert len(finding.evidence_refs) == 3
 
 
+def test_llm_bank_analysis_ignores_uncertainty_resolved_by_verified_fields():
+    case = make_llm_case()
+    analysis = make_valid_llm_bank_analysis().model_copy(update={
+        "uncertainty_codes": [
+            "account_unclear",
+            "entity_unclear",
+            "item_reference_unclear",
+        ],
+        "uncertainty_reasons": [
+            "The full account number is not present.",
+            "No branch registration identifier is present.",
+            "No invoice references are present.",
+        ],
+    })
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_resolved_uncertainty",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "satisfies"
+    assert finding.account_match == "match"
+    assert finding.entity_match == "match"
+    assert finding.uncertainty_reasons == []
+
+
+def test_llm_document_quality_uncertainty_still_requires_review():
+    case = make_llm_case()
+    analysis = make_valid_llm_bank_analysis().model_copy(update={
+        "uncertainty_codes": ["document_quality_problem"],
+        "uncertainty_reasons": ["Several statement rows are unreadable."],
+    })
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_llm_quality_problem",
+        analysis=analysis,
+        requirement_id="req_july_bank",
+    )
+
+    assert finding.result == "needs_review"
+    assert finding.uncertainty_reasons == [
+        "Several statement rows are unreadable."
+    ]
+
+
 def test_llm_analysis_account_mismatch_needs_review():
     case = make_llm_case()
 
