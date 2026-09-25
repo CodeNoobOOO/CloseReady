@@ -121,6 +121,8 @@ class OutboxRecord(ContractModel):
     created_by: Text
     created_at: Timestamp
     delivery_status: Literal['not_attempted', 'queued', 'sent', 'failed', 'delivery_unknown'] = 'not_attempted'
+    retry_of_outbox_id: Text | None = None
+    reminder_id: Text | None = None
 
 
 class OutboxPage(ContractModel):

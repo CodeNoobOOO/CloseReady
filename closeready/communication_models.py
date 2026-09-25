@@ -59,6 +59,7 @@ class DeliveryRecoveryResult(ContractModel):
     source_id: Text
     source_status: Literal['sent', 'failed', 'delivery_unknown']
     decision: Literal['retry_delivery', 'confirm_delivered', 'keep_unresolved']
+    review_task_id: Text
     retry_outbox_id: Text | None = None
 
 

@@ -1,5 +1,6 @@
 """Student 3 sandbox follow-up tests. Scripted LLM doubles are labeled test sinks."""
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +16,7 @@ from closeready.communication_models import (
     DeliverOutboxRequest, IngestReplyRequest, ReconcileDeliveryRequest,
     RetryDeliveryRequest,
 )
+from closeready.communication_models import ReminderRecord
 from closeready.communication_store import CommunicationStore, reminders
 from closeready.config import AccessConfig
 from closeready.document_assessment import assess_document
@@ -63,6 +65,72 @@ def assessment(requirement_id, **changes):
     }
     data.update(changes)
     return ReplyAssessmentContent.model_validate(data)
+
+
+SECOND_MANAGER_TOKEN = 'second-manager-synthetic-token-never-use'
+DELIVERY_REVIEW_CODES = {
+    'DELIVERY_FAILED', 'DELIVERY_UNKNOWN',
+    'REMINDER_DELIVERY_FAILED', 'REMINDER_DELIVERY_UNKNOWN',
+}
+
+
+def second_manager_config(**policy_overrides):
+    data = communication_config(**policy_overrides).model_dump(mode='json')
+    data['principals'].append({
+        'user_id': 'user_manager_two',
+        'token_sha256': hashlib.sha256(SECOND_MANAGER_TOKEN.encode()).hexdigest(),
+        'client_ids': ['client_demo'], 'can_manage': True,
+    })
+    return AccessConfig.model_validate(data)
+
+
+def question(requirement_id):
+    return assessment(requirement_id, intent='question', promised_at=None,
+                      evidence_excerpt='Which statement do you need?')
+
+
+class SwitchableMailSink(SandboxMailSink):
+    """Labeled test sink: each send pops 'ok', 'fail' or 'timeout'. Never live."""
+
+    def __init__(self, outcomes=()):
+        self.outcomes = list(outcomes)
+
+    def send(self, *, to_email: str, subject: str, body: str, metadata: dict) -> str:
+        outcome = self.outcomes.pop(0) if self.outcomes else 'ok'
+        if outcome == 'fail':
+            raise RuntimeError('sandbox send failed')
+        if outcome == 'timeout':
+            raise TimeoutError('sandbox send timed out')
+        return super().send(to_email=to_email, subject=subject, body=body, metadata=metadata)
+
+
+def approve_first_draft(store, runtime, actor, case_id, prefix):
+    rid = store.get_case(actor, case_id).requirements[0].requirement_id
+    draft = tool('propose_action', {'action': {'action_type': 'request_documents',
+        'requirement_ids': [rid], 'finding_ids': [], 'reason': 'The statement is missing.',
+        'payload': {'subject': 'July statement',
+                    'body': 'Please upload the complete July statement.',
+                    'requirement_ids': [rid]}}}, prefix + '-draft')
+    AgentRuntime(runtime, ScriptedProvider(
+        [tool('get_case_context', {}), draft, final()])).analyse(
+            actor, case_id, store.get_case(actor, case_id).state_version, prefix + '-run')
+    task = next(t for t in runtime.review_tasks(actor, case_id).items if t.draft is not None)
+    runtime.decide_review(actor, case_id, ReviewDecisionRequest.model_validate({
+        'expected_state_version': store.get_case(actor, case_id).state_version,
+        'review_task_id': task.review_task_id, 'decision': 'approve_draft',
+        'reason': 'Reviewed by the assigned manager.'}), prefix + '-approve')
+    return next(item for item in runtime.outbox_records(actor, case_id).items
+                if item.review_task_id == task.review_task_id)
+
+
+def force_due(store, reminder, status=None):
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    record = {**reminder.model_dump(mode='json'), 'scheduled_at': past}
+    if status is not None:
+        record['status'] = status
+    with store.write() as conn:
+        conn.execute(update(reminders).where(
+            reminders.c.reminder_id == reminder.reminder_id).values(record=json.dumps(record)))
 
 
 class CommunicationSchemaTests(unittest.TestCase):
@@ -746,6 +814,254 @@ class CommunicationStoreTests(unittest.TestCase):
         self.assertNotIn(associated.reply.body, provider.messages[0][0]['content'])
 
 
+class FollowUpRegressionTests(unittest.TestCase):
+    """PR #9 business-flow regressions: limit bypass, ownership, reply pause, provenance."""
+
+    def env(self, access=None, **policy):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        url = 'sqlite:///' + (Path(tmp.name) / 'regress.db').as_posix()
+        self.access = access or communication_config(**policy)
+        self.store = Store(url, self.access)
+        self.addCleanup(self.store.engine.dispose)
+        self.owner = self.access.principals[0]
+        self.case = self.store.create_case(
+            self.owner, CreateCaseRequest.model_validate(case_request()), 'regress-case')
+        self.runtime = RuntimeStore(self.store)
+        self.mail = SwitchableMailSink()
+        self.db = CommunicationStore(self.store, self.runtime, self.mail)
+        self.rid = self.store.get_case(self.owner, self.case.case_id).requirements[0].requirement_id
+
+    def version(self):
+        return self.store.get_case(self.owner, self.case.case_id).state_version
+
+    def reminders_now(self):
+        return self.db.list_reminders(self.owner, self.case.case_id).items
+
+    def reviews(self, code=None):
+        return [task for task in self.runtime.review_tasks(self.owner, self.case.case_id).items
+                if code is None or task.reason_code == code]
+
+    def mailbox_count(self):
+        return len(self.db.list_mailbox(self.owner, self.case.case_id).items)
+
+    def assert_outbox_provenance(self):
+        tasks = {task.review_task_id: task for task in self.reviews()}
+        retries = 0
+        for item in self.runtime.outbox_records(self.owner, self.case.case_id).items:
+            self.assertIn(item.review_task_id, tasks, 'outbox must reference a real review task')
+            if item.retry_of_outbox_id is None and item.reminder_id is None:
+                self.assertIsNotNone(tasks[item.review_task_id].approved_draft)
+                continue
+            retries += 1
+            task = tasks[item.review_task_id]
+            self.assertIn(task.reason_code, DELIVERY_REVIEW_CODES)
+            self.assertEqual(task.status, 'resolved')
+            self.assertEqual(task.resolution, 'superseded')
+            self.assertIsNotNone(task.resolved_by)
+            self.assertIsNotNone(task.resolution_reason)
+        return retries
+
+    def send_initial(self, actor=None):
+        queued = approve_first_draft(self.store, self.runtime, self.owner, self.case.case_id, 'init')
+        result = self.db.deliver_outbox(actor or self.owner, self.case.case_id, queued.outbox_id,
+            DeliverOutboxRequest(), 'init-deliver')
+        return queued, result
+
+    def test_limit_one_failed_reminder_then_successful_retry_stops_chase(self):
+        self.env(max_reminders_per_requirement=1, min_reminder_interval_hours=1)
+        _queued, initial = self.send_initial()
+        self.assertEqual(initial.delivery_status, 'sent')
+        first = [item for item in self.reminders_now() if item.status == 'scheduled']
+        self.assertEqual(len(first), 1)
+        force_due(self.store, first[0])
+        self.mail.outcomes = ['fail']
+        failed = self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'reminder-fail')
+        self.assertEqual(failed.items[0].status, 'failed')
+        self.assertEqual(self.reviews('REMINDER_LIMIT'), [])
+        recovered = self.db.retry_reminder(self.owner, self.case.case_id, first[0].reminder_id,
+            RetryDeliveryRequest(expected_state_version=self.version()), 'reminder-retry')
+        retry = next(item for item in self.runtime.outbox_records(
+            self.owner, self.case.case_id).items if item.outbox_id == recovered.retry_outbox_id)
+        self.assertEqual(retry.reminder_id, first[0].reminder_id)
+        sent = self.db.deliver_outbox(self.owner, self.case.case_id, retry.outbox_id,
+            DeliverOutboxRequest(), 'reminder-retry-deliver')
+        self.assertEqual(sent.delivery_status, 'sent')
+        self.assertEqual(self.mailbox_count(), 2)
+        self.assertFalse(any(item.status in ('scheduled', 'paused') for item in self.reminders_now()))
+        self.assertEqual(len(self.reviews('REMINDER_LIMIT')), 1)
+        for key in ('after-limit-1', 'after-limit-2'):
+            self.assertEqual(
+                self.db.dispatch_due_reminders(self.owner, self.case.case_id, key).items, [])
+        self.db.dispatch_due_all()
+        self.assertEqual(self.mailbox_count(), 2)
+        self.assertEqual(len(self.reviews('REMINDER_LIMIT')), 1)
+        self.assertEqual(self.assert_outbox_provenance(), 1)
+
+    def test_retry_of_failed_reminder_resend_keeps_lineage_and_limit(self):
+        self.env(max_reminders_per_requirement=1, min_reminder_interval_hours=1)
+        self.send_initial()
+        first = next(item for item in self.reminders_now() if item.status == 'scheduled')
+        force_due(self.store, first)
+        self.mail.outcomes = ['fail']
+        self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'fail-1')
+        recovered = self.db.retry_reminder(self.owner, self.case.case_id, first.reminder_id,
+            RetryDeliveryRequest(expected_state_version=self.version()), 'retry-1')
+        retry = next(item for item in self.runtime.outbox_records(
+            self.owner, self.case.case_id).items if item.outbox_id == recovered.retry_outbox_id)
+        self.mail.outcomes = ['fail']
+        self.db.deliver_outbox(self.owner, self.case.case_id, retry.outbox_id,
+            DeliverOutboxRequest(), 'retry-1-deliver')
+        again = self.db.retry_outbox(self.owner, self.case.case_id, retry.outbox_id,
+            RetryDeliveryRequest(expected_state_version=self.version()), 'retry-2')
+        second = next(item for item in self.runtime.outbox_records(
+            self.owner, self.case.case_id).items if item.outbox_id == again.retry_outbox_id)
+        self.assertEqual(second.reminder_id, first.reminder_id)
+        self.assertEqual(second.retry_of_outbox_id, retry.outbox_id)
+        reply = self.db.ingest_reply(self.owner, self.case.case_id, IngestReplyRequest.model_validate({
+            'expected_state_version': self.version(), 'sender_email': 'client@example.test',
+            'received_at': '2026-09-24T09:00:00+08:00', 'body': 'Which statement?'}), 'reply-mid')
+        with self.assertRaises(DomainError) as raised:
+            self.db.deliver_outbox(self.owner, self.case.case_id, second.outbox_id,
+                DeliverOutboxRequest(), 'retry-2-paused')
+        self.assertEqual(raised.exception.code, 'FOLLOW_UP_PAUSED')
+        self.db.apply_reply_assessment(self.owner, self.case.case_id, reply.reply.reply_id,
+            question(self.rid), self.version(), 'assess-mid')
+        self.db.deliver_outbox(self.owner, self.case.case_id, second.outbox_id,
+            DeliverOutboxRequest(), 'retry-2-deliver')
+        self.assertEqual(self.mailbox_count(), 2)
+        self.assertEqual(len(self.reviews('REMINDER_LIMIT')), 1)
+        self.assertEqual(self.assert_outbox_provenance(), 2)
+
+    def test_second_manager_cannot_recover_and_owner_resolves_the_real_review(self):
+        self.env(access=second_manager_config())
+        second = next(p for p in self.access.principals if p.user_id == 'user_manager_two')
+        queued = approve_first_draft(self.store, self.runtime, self.owner, self.case.case_id, 'two')
+        self.mail.outcomes = ['fail']
+        failed = self.db.deliver_outbox(second, self.case.case_id, queued.outbox_id,
+            DeliverOutboxRequest(), 'two-deliver')
+        self.assertEqual(failed.delivery_status, 'failed')
+        [review] = self.reviews('DELIVERY_FAILED')
+        self.assertEqual(review.assigned_to, self.owner.user_id)
+        with self.assertRaises(DomainError) as raised:
+            self.db.retry_outbox(second, self.case.case_id, queued.outbox_id,
+                RetryDeliveryRequest(expected_state_version=self.version()), 'two-retry')
+        self.assertEqual(raised.exception.code, 'FORBIDDEN')
+        self.assertEqual(self.reviews('DELIVERY_FAILED')[0].status, 'open')
+        recovered = self.db.retry_outbox(self.owner, self.case.case_id, queued.outbox_id,
+            RetryDeliveryRequest(expected_state_version=self.version()), 'owner-retry')
+        self.assertEqual(recovered.review_task_id, review.review_task_id)
+        [resolved] = self.reviews('DELIVERY_FAILED')
+        self.assertEqual(resolved.status, 'resolved')
+        self.assertEqual(resolved.resolved_by, self.owner.user_id)
+        with self.assertRaises(DomainError) as raised:
+            self.db.retry_outbox(self.owner, self.case.case_id, queued.outbox_id,
+                RetryDeliveryRequest(expected_state_version=self.version()), 'owner-retry-2')
+        self.assertEqual(raised.exception.code, 'DELIVERY_ALREADY_RECOVERED')
+        self.assertEqual(self.assert_outbox_provenance(), 1)
+
+    def test_owner_reconciles_unknown_delivery_started_by_second_manager(self):
+        self.env(access=second_manager_config())
+        second = next(p for p in self.access.principals if p.user_id == 'user_manager_two')
+        queued = approve_first_draft(self.store, self.runtime, self.owner, self.case.case_id, 'unk')
+        self.mail.outcomes = ['timeout']
+        self.db.deliver_outbox(second, self.case.case_id, queued.outbox_id,
+            DeliverOutboxRequest(), 'unk-deliver')
+        for decision in ('keep_unresolved', 'confirm_delivered'):
+            with self.assertRaises(DomainError) as raised:
+                self.db.reconcile_outbox(second, self.case.case_id, queued.outbox_id,
+                    ReconcileDeliveryRequest(expected_state_version=self.version(),
+                                             decision=decision), 'unk-second-' + decision)
+            self.assertEqual(raised.exception.code, 'FORBIDDEN')
+        confirmed = self.db.reconcile_outbox(self.owner, self.case.case_id, queued.outbox_id,
+            ReconcileDeliveryRequest(expected_state_version=self.version(),
+                                     decision='confirm_delivered'), 'unk-owner')
+        self.assertEqual(confirmed.source_status, 'sent')
+        [review] = self.reviews('DELIVERY_UNKNOWN')
+        self.assertEqual(review.status, 'resolved')
+        self.assertEqual(review.review_task_id, confirmed.review_task_id)
+        self.assertEqual(self.mailbox_count(), 0)
+
+    def test_due_reminder_after_client_reply_waits_for_assessment(self):
+        self.env()
+        self.send_initial()
+        [scheduled] = [item for item in self.reminders_now() if item.status == 'scheduled']
+        reply = self.db.ingest_reply(self.owner, self.case.case_id, IngestReplyRequest.model_validate({
+            'expected_state_version': self.version(), 'sender_email': 'client@example.test',
+            'received_at': '2026-09-24T09:00:00+08:00', 'body': 'Which statement do you need?'}),
+            'reply-pending')
+        [paused] = self.reminders_now()
+        self.assertEqual(paused.status, 'paused')
+        force_due(self.store, paused)
+        self.assertEqual(
+            self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'while-pending').items, [])
+        self.db.dispatch_due_all()
+        self.assertEqual(self.mailbox_count(), 1)
+        # A reminder still marked scheduled and due must also be held back.
+        force_due(self.store, scheduled, status='scheduled')
+        held = self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'race-pending')
+        self.assertEqual([item.status for item in held.items], ['paused'])
+        self.assertEqual(self.mailbox_count(), 1)
+        self.db.apply_reply_assessment(self.owner, self.case.case_id, reply.reply.reply_id,
+            question(self.rid), self.version(), 'assess-question')
+        [resumed] = self.reminders_now()
+        self.assertEqual(resumed.status, 'scheduled')
+        sent = self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'after-assess')
+        self.assertEqual(sent.items[0].status, 'sent')
+        self.assertEqual(self.mailbox_count(), 2)
+
+    def test_reply_assessment_reschedules_or_keeps_reminders_paused(self):
+        self.env()
+        self.send_initial()
+        [original] = self.reminders_now()
+        commitment_reply = self.db.ingest_reply(
+            self.owner, self.case.case_id, IngestReplyRequest.model_validate({
+                'expected_state_version': self.version(), 'sender_email': 'client@example.test',
+                'received_at': '2026-09-24T09:00:00+08:00',
+                'body': 'I will send the July statement on 11 September 2026 by 5 pm.'}), 'reply-commit')
+        applied = self.db.apply_reply_assessment(
+            self.owner, self.case.case_id, commitment_reply.reply.reply_id,
+            assessment(self.rid), self.version(), 'assess-commit')
+        statuses = {item.reminder_id: item.status for item in self.reminders_now()}
+        self.assertEqual(statuses[original.reminder_id], 'cancelled')
+        self.assertEqual(statuses[applied.reminder.reminder_id], 'scheduled')
+        dispute_reply = self.db.ingest_reply(
+            self.owner, self.case.case_id, IngestReplyRequest.model_validate({
+                'expected_state_version': self.version(), 'sender_email': 'client@example.test',
+                'received_at': '2026-09-24T10:00:00+08:00',
+                'body': 'I already sent this.'}), 'reply-dispute')
+        self.db.apply_reply_assessment(
+            self.owner, self.case.case_id, dispute_reply.reply.reply_id,
+            assessment(self.rid, intent='dispute', promised_at=None,
+                       evidence_excerpt='I already sent this.'), self.version(), 'assess-dispute')
+        current = next(item for item in self.reminders_now()
+                       if item.reminder_id == applied.reminder.reminder_id)
+        self.assertEqual(current.status, 'paused')
+        force_due(self.store, current)
+        self.assertEqual(
+            self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'dispute-held').items, [])
+        self.assertEqual(self.mailbox_count(), 1)
+
+    def test_document_submitted_reply_defers_reminder_by_one_interval(self):
+        self.env(min_reminder_interval_hours=6)
+        self.send_initial()
+        [original] = self.reminders_now()
+        force_due(self.store, original)
+        reply = self.db.ingest_reply(self.owner, self.case.case_id, IngestReplyRequest.model_validate({
+            'expected_state_version': self.version(), 'sender_email': 'client@example.test',
+            'received_at': '2026-09-24T09:00:00+08:00', 'body': 'I uploaded it just now.'}),
+            'reply-uploaded')
+        self.db.apply_reply_assessment(self.owner, self.case.case_id, reply.reply.reply_id,
+            assessment(self.rid, intent='document_submitted', promised_at=None,
+                       evidence_excerpt='I uploaded it just now.'), self.version(), 'assess-upload')
+        [deferred] = self.reminders_now()
+        self.assertEqual(deferred.status, 'scheduled')
+        self.assertGreater(deferred.scheduled_at,
+                           datetime.now(timezone.utc) + timedelta(hours=5))
+        self.assertEqual(
+            self.db.dispatch_due_reminders(self.owner, self.case.case_id, 'deferred').items, [])
+
+
 class CommunicationHttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -763,8 +1079,9 @@ class CommunicationHttpTests(unittest.TestCase):
                             'requirement_ids': [rid_holder['rid']]}}}, 'http-draft')
 
         provider = ScriptedProvider([tool('get_case_context', {}), propose_from_context, final()])
+        self.mail = SwitchableMailSink()
         self.client = TestClient(create_app(self.url, communication_config(), provider=provider,
-            mail=SandboxMailSink()))
+            mail=self.mail))
         self.client.__enter__()
         self.headers = {'Authorization': 'Bearer ' + TOKEN, 'Idempotency-Key': 'http-case'}
         created = self.client.post('/api/v1/cases', json=case_request(), headers=self.headers)
@@ -818,6 +1135,112 @@ class CommunicationHttpTests(unittest.TestCase):
             headers=self.headers).status_code, 200)
         self.assertEqual(self.client.get('/api/v1/cases/' + self.case['case_id'] + '/reminders',
             headers=self.headers).status_code, 200)
+
+    def test_http_failed_delivery_recovery_reply_pause_and_resume_end_to_end(self):
+        base = '/api/v1/cases/' + self.case['case_id']
+
+        def post(path, body, key):
+            response = self.client.post(base + path, json=body,
+                headers=dict(self.headers, **{'Idempotency-Key': key}))
+            return response
+
+        def get(path):
+            response = self.client.get(base + path, headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()
+
+        def version():
+            return get('')['state_version']
+
+        self.mail.outcomes = ['fail']
+        failed = post('/outbox/' + self.outbox['outbox_id'] + '/deliver', {}, 'e2e-deliver-1')
+        self.assertEqual(failed.status_code, 200, failed.text)
+        self.assertEqual(failed.json()['delivery_status'], 'failed')
+        self.assertEqual(get('/reminders')['items'], [])
+        review = next(t for t in get('/review-tasks')['items'] if t['reason_code'] == 'DELIVERY_FAILED')
+        self.assertEqual(review['status'], 'open')
+
+        stale = post('/outbox/' + self.outbox['outbox_id'] + '/retry',
+                     {'expected_state_version': 1}, 'e2e-retry-stale')
+        self.assertEqual(stale.status_code, 409, stale.text)
+        retried = post('/outbox/' + self.outbox['outbox_id'] + '/retry',
+                       {'expected_state_version': version()}, 'e2e-retry')
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()['review_task_id'], review['review_task_id'])
+        retry_id = retried.json()['retry_outbox_id']
+        outbox = {item['outbox_id']: item for item in get('/outbox')['items']}
+        self.assertEqual(outbox[retry_id]['review_task_id'], review['review_task_id'])
+        self.assertEqual(outbox[retry_id]['retry_of_outbox_id'], self.outbox['outbox_id'])
+        self.assertIsNone(outbox[retry_id]['reminder_id'])
+        tasks = {t['review_task_id']: t for t in get('/review-tasks')['items']}
+        self.assertEqual(tasks[review['review_task_id']]['resolution'], 'superseded')
+
+        replay = post('/outbox/' + self.outbox['outbox_id'] + '/deliver', {}, 'e2e-deliver-1')
+        self.assertEqual(replay.json()['delivery_status'], 'failed')
+        self.assertEqual(get('/mailbox')['items'], [])
+        delivered = post('/outbox/' + retry_id + '/deliver', {}, 'e2e-deliver-2')
+        self.assertEqual(delivered.status_code, 200, delivered.text)
+        self.assertEqual(delivered.json()['delivery_status'], 'sent')
+        [chase] = get('/reminders')['items']
+        self.assertEqual(chase['status'], 'scheduled')
+        self.assertEqual(len(get('/mailbox')['items']), 1)
+
+        reply = post('/replies', {
+            'expected_state_version': version(), 'sender_email': 'client@example.test',
+            'received_at': '2026-09-24T09:00:00+08:00', 'body': 'Which statement do you need?',
+        }, 'e2e-reply')
+        self.assertEqual(reply.status_code, 201, reply.text)
+        [paused] = get('/reminders')['items']
+        self.assertEqual(paused['status'], 'paused')
+        store = Store(self.url, communication_config())
+        try:
+            force_due(store, ReminderRecord.model_validate(paused))
+            held = post('/reminders/dispatch-due', {}, 'e2e-dispatch-held')
+            self.assertEqual(held.status_code, 200, held.text)
+            self.assertEqual(held.json()['items'], [])
+            self.assertEqual(len(get('/mailbox')['items']), 1)
+            actor = store.access.principals[0]
+            CommunicationStore(store, RuntimeStore(store), self.mail).apply_reply_assessment(
+                actor, self.case['case_id'], reply.json()['reply']['reply_id'],
+                question(self.outbox['requirement_ids'][0]), version(), 'e2e-assess')
+        finally:
+            store.engine.dispose()
+        self.assertEqual(get('/reminders')['items'][0]['status'], 'scheduled')
+        sent = post('/reminders/dispatch-due', {}, 'e2e-dispatch-sent')
+        self.assertEqual(sent.status_code, 200, sent.text)
+        self.assertEqual([item['status'] for item in sent.json()['items']], ['sent'])
+        mailbox = get('/mailbox')['items']
+        self.assertEqual(len(mailbox), 2)
+        self.assertEqual({m['source'] for m in mailbox}, {'outbox', 'reminder'})
+
+    def test_http_unknown_delivery_reconcile_routes(self):
+        base = '/api/v1/cases/' + self.case['case_id']
+        self.mail.outcomes = ['timeout']
+        unknown = self.client.post(base + '/outbox/' + self.outbox['outbox_id'] + '/deliver',
+            json={}, headers=dict(self.headers, **{'Idempotency-Key': 'rec-deliver'}))
+        self.assertEqual(unknown.json()['delivery_status'], 'delivery_unknown')
+        version = self.client.get(base, headers=self.headers).json()['state_version']
+        path = base + '/outbox/' + self.outbox['outbox_id'] + '/reconcile'
+        kept = self.client.post(path, json={'expected_state_version': version,
+            'decision': 'keep_unresolved'}, headers=dict(self.headers, **{'Idempotency-Key': 'rec-keep'}))
+        self.assertEqual(kept.status_code, 200, kept.text)
+        wrong_route = self.client.post(base + '/outbox/' + self.outbox['outbox_id'] + '/retry',
+            json={'expected_state_version': version},
+            headers=dict(self.headers, **{'Idempotency-Key': 'rec-wrong'}))
+        self.assertEqual(wrong_route.status_code, 409)
+        self.assertEqual(wrong_route.json()['error']['code'], 'DELIVERY_NOT_FAILED')
+        other = self.client.post(path, json={'expected_state_version': version,
+            'decision': 'confirm_delivered'},
+            headers={'Authorization': 'Bearer ' + OTHER_TOKEN, 'Idempotency-Key': 'rec-other'})
+        self.assertEqual(other.status_code, 404)
+        retried = self.client.post(path, json={'expected_state_version': version,
+            'decision': 'retry_delivery'}, headers=dict(self.headers, **{'Idempotency-Key': 'rec-retry'}))
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(self.client.get(base + '/mailbox', headers=self.headers).json()['items'], [])
+        outbox = {item['outbox_id']: item for item in
+                  self.client.get(base + '/outbox', headers=self.headers).json()['items']}
+        self.assertEqual(outbox[self.outbox['outbox_id']]['delivery_status'], 'failed')
+        self.assertEqual(outbox[retried.json()['retry_outbox_id']]['delivery_status'], 'not_attempted')
 
     def test_mail_disabled_process_cannot_claim_delivery(self):
         with TestClient(create_app(self.url, communication_config())) as client:

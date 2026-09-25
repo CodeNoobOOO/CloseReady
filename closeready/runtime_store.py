@@ -152,19 +152,24 @@ class RuntimeStore:
             outbox_id=record.outbox_id, case_id=record.case_id,
             review_task_id=record.review_task_id, record=record.model_dump_json()))
 
-    def resolve_review_by_key(self, conn, actor, case, key, resolution, reason):
-        row = conn.execute(select(runs).where(
-            runs.c.actor_id == actor.user_id, runs.c.case_id == case.case_id,
-            runs.c.key == key)).mappings().one_or_none()
-        if row is None:
-            return None
-        raw = conn.execute(select(reviews.c.record).where(
-            reviews.c.run_id == row['run_id'])).scalar_one_or_none()
-        if raw is None:
-            return None
-        task = ReviewTaskRecord.model_validate_json(raw)
+    def review_by_key(self, conn, case_id, key):
+        """Policy review for a case/key, whichever actor's transaction created it."""
+        found = None
+        for run_id in conn.execute(select(runs.c.run_id).where(
+                runs.c.case_id == case_id, runs.c.key == key)).scalars():
+            raw = conn.execute(select(reviews.c.record).where(
+                reviews.c.run_id == run_id)).scalar_one_or_none()
+            if raw is None:
+                continue
+            task = ReviewTaskRecord.model_validate_json(raw)
+            if task.status == 'open':
+                return task
+            found = found or task
+        return found
+
+    def resolve_review(self, conn, actor, task, resolution, reason):
         if task.status != 'open':
-            return task
+            raise DomainError('REVIEW_ALREADY_RESOLVED', 'Review task is already resolved.', 409)
         resolved = ReviewTaskRecord.model_validate({
             **task.model_dump(mode='json'),
             'status': 'resolved', 'resolution': resolution,

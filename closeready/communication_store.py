@@ -25,7 +25,7 @@ from .mail_messages import (
 from .models import CaseSnapshot, MessageDraft, ReplyAssessment, ReplyAssessmentContent
 from .reply_assessment import assess_reply as run_reply_assessment
 from .runtime_models import OutboxRecord, ReviewTaskRecord
-from .runtime_store import reviews
+from .runtime_store import outbox, reviews
 from .store import DomainError, Store, case_communication_refs, cases, forbidden
 
 communication_metadata = MetaData()
@@ -150,18 +150,27 @@ class CommunicationStore:
             conn.execute(select(reminders).where(reminders.c.case_id == case_id)).mappings()]
 
     def _attempted_reminder_count(self, conn, case_id, requirement_ids):
+        attempted = ('sent', 'queued', 'delivery_unknown')
         sent_count = 0
         latest = None
         for reminder in self._case_reminders(conn, case_id):
             if not (set(reminder.requirement_ids) & set(requirement_ids)):
                 continue
-            if reminder.status in ('sent', 'queued', 'delivery_unknown'):
+            if reminder.status in attempted:
                 sent_count += 1
                 if latest is None or reminder.scheduled_at >= latest.scheduled_at:
                     latest = reminder
+        # A manager-approved resend of a failed reminder is still a reminder attempt.
+        for raw in conn.execute(select(outbox.c.record).where(
+                outbox.c.case_id == case_id)).scalars():
+            item = OutboxRecord.model_validate_json(raw)
+            if item.reminder_id is None or item.delivery_status not in attempted:
+                continue
+            if set(item.requirement_ids) & set(requirement_ids):
+                sent_count += 1
         return sent_count, latest
 
-    def _follow_up_paused(self, conn, case_id, requirement_ids):
+    def _review_blocks(self, conn, case_id, requirement_ids):
         wanted = set(requirement_ids)
         for raw in conn.execute(select(reviews.c.record).where(
                 reviews.c.case_id == case_id)).scalars():
@@ -173,8 +182,56 @@ class CommunicationStore:
                 return True
         return False
 
-    def _escalate_reminder_limit(self, conn, actor, case, requirement_ids):
+    def _unassessed_reply(self, conn, case_id):
+        received = set(conn.execute(select(replies.c.reply_id).where(
+            replies.c.case_id == case_id)).scalars())
+        if not received:
+            return False
+        assessed = set(conn.execute(select(findings.c.reply_id).where(
+            findings.c.case_id == case_id)).scalars())
+        return bool(received - assessed)
+
+    def _follow_up_paused(self, conn, case_id, requirement_ids):
+        return (self._review_blocks(conn, case_id, requirement_ids)
+                or self._unassessed_reply(conn, case_id))
+
+    def _pause_for_reply(self, conn, actor, case):
+        for reminder in self._case_reminders(conn, case.case_id):
+            if reminder.status != 'scheduled':
+                continue
+            self._save_reminder(conn, ReminderRecord.model_validate({
+                **reminder.model_dump(mode='json'), 'status': 'paused'}))
+            self.store._audit(conn, actor, 'pause_reminder', 'blocked',
+                'client_reply_pending_assessment', case)
+
+    def _resume_paused(self, conn, actor, case, policy, not_before):
+        resumed = []
+        for reminder in self._case_reminders(conn, case.case_id):
+            if reminder.status != 'paused':
+                continue
+            if self._follow_up_paused(conn, case.case_id, reminder.requirement_ids):
+                continue
+            scheduled_at = max(reminder.scheduled_at, not_before)
+            if not self._in_window(policy, scheduled_at):
+                scheduled_at = self._next_window(policy, scheduled_at)
+            current = ReminderRecord.model_validate({
+                **reminder.model_dump(mode='json'),
+                'status': 'scheduled', 'scheduled_at': scheduled_at})
+            self._save_reminder(conn, current)
+            self.store._audit(conn, actor, 'resume_reminder', 'queued',
+                'follow_up_resumed', case)
+            resumed.append(current)
+        return resumed
+
+    def _case_policy_review(self, conn, actor, case, code, reason, requirement_ids, key):
+        existing = self.runtime.review_by_key(conn, case.case_id, key)
+        if existing is not None:
+            return existing
         return self.runtime.create_policy_review(
+            conn, actor, case, code, reason, requirement_ids, key)
+
+    def _escalate_reminder_limit(self, conn, actor, case, requirement_ids):
+        return self._case_policy_review(
             conn, actor, case, 'REMINDER_LIMIT',
             'Automatic reminders stopped after the configured limit.',
             requirement_ids, 'reminder-limit|' + case.case_id + '|' + ','.join(sorted(requirement_ids)))
@@ -186,7 +243,7 @@ class CommunicationStore:
             'DELIVERY_FAILED': 'Outbox delivery failed; a human must decide the next send.',
             'DELIVERY_UNKNOWN': 'Outbox delivery is unknown; do not automatically resend.',
         }
-        return self.runtime.create_policy_review(
+        return self._case_policy_review(
             conn, actor, case, code, reasons[code], requirement_ids, code + '|' + source_id)
 
     def _save_reminder(self, conn, reminder):
@@ -353,6 +410,16 @@ class CommunicationStore:
                 if set(outstanding) != set(queued.requirement_ids):
                     raise DomainError('OBSOLETE_DRAFT',
                         'One or more drafted items are no longer outstanding; regenerate the message.', 409)
+                if queued.reminder_id is not None:
+                    sent_count, _latest = self._attempted_reminder_count(
+                        conn, case_id, queued.requirement_ids)
+                    if sent_count >= policy.max_reminders_per_requirement:
+                        self._escalate_reminder_limit(conn, actor, case, queued.requirement_ids)
+                        raise DomainError('REMINDER_LIMIT',
+                            'The reminder limit is reached; a manager must decide next steps.', 409)
+                    if self._follow_up_paused(conn, case_id, queued.requirement_ids):
+                        raise DomainError('FOLLOW_UP_PAUSED',
+                            'Follow-up is paused by an open review or unassessed client reply.', 409)
                 contact = self._resolve_contact(case, request.contact_id)
                 if not self._in_window(policy):
                     raise DomainError('OUTSIDE_SENDING_WINDOW',
@@ -414,7 +481,8 @@ class CommunicationStore:
             recipient_contact_id=contact.contact_id, provider_message_id=provider_id,
             mailbox_backend=backend, live=live)
 
-    def _new_retry_outbox(self, conn, actor, case, requirement_ids, subject, body):
+    def _new_retry_outbox(self, conn, actor, case, review, requirement_ids, subject, body,
+                          *, retry_of_outbox_id, reminder_id):
         outstanding = self._outstanding(case, requirement_ids)
         if set(outstanding) != set(requirement_ids):
             raise DomainError('OBSOLETE_DRAFT',
@@ -423,9 +491,10 @@ class CommunicationStore:
             subject=subject, body=body, requirement_ids=requirement_ids))
         record = OutboxRecord(
             outbox_id='outbox_' + uuid4().hex, case_id=case.case_id,
-            review_task_id='review_retry_' + uuid4().hex,
+            review_task_id=review.review_task_id,
             requirement_ids=list(requirement_ids), subject=subject, body=body,
-            created_by=actor.user_id, created_at=utcnow())
+            created_by=actor.user_id, created_at=utcnow(),
+            retry_of_outbox_id=retry_of_outbox_id, reminder_id=reminder_id)
         self.runtime.insert_outbox(conn, record)
         return record
 
@@ -474,18 +543,18 @@ class CommunicationStore:
                 replay = self._replay_json(conn, actor, operation, key, digest)
                 if replay:
                     return DeliveryRecoveryResult.model_validate_json(replay)
-                if case.state_version != request.expected_state_version:
-                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
                 if source == 'outbox':
                     record = self.runtime.load_outbox(conn, actor, case_id, source_id)
                     status = record.delivery_status
                     requirement_ids = record.requirement_ids
                     subject, body = record.subject, record.body
+                    retry_of_outbox_id, reminder_id = source_id, record.reminder_id
                 else:
                     record = self._load_reminder(conn, case_id, source_id)
                     status = record.status
                     requirement_ids = record.requirement_ids
                     subject, body = record.subject, record.body
+                    retry_of_outbox_id, reminder_id = None, source_id
                 if forced_decision == 'retry_delivery' and status != 'failed':
                     raise DomainError(
                         'DELIVERY_NOT_FAILED',
@@ -494,18 +563,29 @@ class CommunicationStore:
                     raise DomainError(
                         'DELIVERY_NOT_UNKNOWN',
                         'Reconciliation applies only to an unknown delivery.', 409)
-                if decision == 'keep_unresolved':
-                    result = DeliveryRecoveryResult(
-                        source=source, source_id=source_id, source_status=status,
-                        decision=decision)
-                    self._remember(conn, actor, operation, key, digest, result)
-                    return result
                 review_code = {
                     ('outbox', 'failed'): 'DELIVERY_FAILED',
                     ('outbox', 'delivery_unknown'): 'DELIVERY_UNKNOWN',
                     ('reminder', 'failed'): 'REMINDER_DELIVERY_FAILED',
                     ('reminder', 'delivery_unknown'): 'REMINDER_DELIVERY_UNKNOWN',
                 }[(source, status)]
+                task = self.runtime.review_by_key(conn, case_id, review_code + '|' + source_id)
+                if task is None or task.status != 'open':
+                    raise DomainError(
+                        'DELIVERY_ALREADY_RECOVERED',
+                        'This delivery has no open review; it was already resolved.', 409)
+                if actor.user_id not in (case.owner_user_id, task.assigned_to):
+                    raise forbidden()
+                if case.state_version != request.expected_state_version:
+                    raise DomainError('STALE_STATE', 'Reload case before retrying.', 409)
+                if decision == 'keep_unresolved':
+                    result = DeliveryRecoveryResult(
+                        source=source, source_id=source_id, source_status=status,
+                        decision=decision, review_task_id=task.review_task_id)
+                    self.store._audit(conn, actor, 'recover_delivery', 'blocked',
+                        'delivery_kept_unresolved', case)
+                    self._remember(conn, actor, operation, key, digest, result)
+                    return result
                 if decision == 'confirm_delivered':
                     next_status = 'sent'
                     reason = 'Manager confirmed the message was delivered.'
@@ -520,19 +600,21 @@ class CommunicationStore:
                     updated = ReminderRecord.model_validate({
                         **record.model_dump(mode='json'), 'status': next_status})
                     self._save_reminder(conn, updated)
-                self.runtime.resolve_review_by_key(
-                    conn, actor, case, review_code + '|' + source_id, 'dismissed', reason)
+                self.runtime.resolve_review(
+                    conn, actor, task,
+                    'superseded' if decision == 'retry_delivery' else 'dismissed', reason)
                 retry = None
                 if decision == 'retry_delivery':
                     retry = self._new_retry_outbox(
-                        conn, actor, case, requirement_ids, subject, body)
+                        conn, actor, case, task, requirement_ids, subject, body,
+                        retry_of_outbox_id=retry_of_outbox_id, reminder_id=reminder_id)
                 case = self._bump(conn, actor, case, reason, 'recover_delivery')
                 if decision == 'confirm_delivered':
                     self._schedule_follow_up(
                         conn, actor, case, requirement_ids, self._policy(case))
                 result = DeliveryRecoveryResult(
                     source=source, source_id=source_id, source_status=next_status,
-                    decision=decision,
+                    decision=decision, review_task_id=task.review_task_id,
                     retry_outbox_id=None if retry is None else retry.outbox_id)
                 self._remember(conn, actor, operation, key, digest, result)
             except DomainError as exc:
@@ -577,6 +659,7 @@ class CommunicationStore:
                         attachment_document_ids=list(attachment_document_ids or []))
                     conn.execute(insert(replies).values(reply_id=record.reply_id, case_id=case_id,
                         record=record.model_dump_json()))
+                    self._pause_for_reply(conn, actor, case)
                     self._bump(conn, actor, case, 'client_reply_received', 'ingest_reply')
                     result = IngestReplyResult(associated=True, reply=record)
                 self._remember(conn, actor, operation, key, digest, result)
@@ -661,11 +744,20 @@ class CommunicationStore:
                 elif finding.needs_clarification:
                     review_code, review_reason = 'REPLY_NEEDS_CLARIFICATION', 'Reply requires clarification.'
                 if review_code:
+                    review_requirements = finding.requirement_ids or [
+                        r.requirement_id for r in case.requirements
+                        if r.status not in ('accepted', 'waived')]
                     review = self.runtime.create_policy_review(conn, actor, case, review_code,
-                        review_reason, finding.requirement_ids, 'reply-review|' + reply_id)
+                        review_reason, review_requirements, 'reply-review|' + reply_id)
                     review_id = review.review_task_id
                 elif commitment is None:
                     self._bump(conn, actor, case, finding.intent, 'assess_reply')
+                if policy is not None:
+                    not_before = utcnow()
+                    if finding.intent == 'document_submitted' and review_code is None:
+                        not_before += timedelta(hours=policy.min_reminder_interval_hours)
+                    self._resume_paused(
+                        conn, actor, self.store._case(conn, actor, case_id), policy, not_before)
                 result = AssessReplyResult(finding=finding, commitment=commitment,
                     reminder=reminder, review_task_id=review_id)
                 self._remember(conn, actor, operation, key, digest, result)
@@ -737,8 +829,9 @@ class CommunicationStore:
         outstanding = self._outstanding(case, requirement_ids)
         if not outstanding:
             return None
-        if self._follow_up_paused(conn, case.case_id, outstanding):
+        if self._review_blocks(conn, case.case_id, outstanding):
             return None
+        initial_status = 'paused' if self._unassessed_reply(conn, case.case_id) else 'scheduled'
         contact = self._resolve_contact(case)
         pending = self._pending_reminder(conn, case.case_id, outstanding, contact.contact_id)
         if pending is not None:
@@ -781,7 +874,7 @@ class CommunicationStore:
         elif latest_sent is not None:
             source_id = latest_sent.source_commitment_id
         reminder = ReminderRecord(reminder_id='reminder_' + uuid4().hex, case_id=case.case_id,
-            requirement_ids=list(outstanding), scheduled_at=scheduled_at, status='scheduled',
+            requirement_ids=list(outstanding), scheduled_at=scheduled_at, status=initial_status,
             dedupe_key=dedupe_key, contact_id=contact.contact_id, policy_version=policy.version,
             source_commitment_id=source_id, attempt_count=0,
             subject=draft.subject, body=draft.body)
@@ -838,7 +931,9 @@ class CommunicationStore:
                     if reminder.status == 'paused':
                         if self._follow_up_paused(conn, case_id, reminder.requirement_ids):
                             continue
-                        scheduled_at = now if self._in_window(policy, now) else self._next_window(policy, now)
+                        scheduled_at = max(reminder.scheduled_at, now)
+                        if not self._in_window(policy, scheduled_at):
+                            scheduled_at = self._next_window(policy, scheduled_at)
                         reminder = ReminderRecord.model_validate({
                             **reminder.model_dump(mode='json'),
                             'status': 'scheduled', 'scheduled_at': scheduled_at,
