@@ -125,6 +125,61 @@ class MailMessageTests(unittest.TestCase):
         self.assertEqual(parsed.attachments[0].filename, 'july-statement.pdf')
         self.assertTrue(parsed.attachments[0].content.startswith(b'%PDF'))
 
+    def test_multipart_prefers_plain_text_over_html(self):
+        message = EmailMessage()
+        message['From'] = 'Client <client@example.test>'
+        message['Subject'] = 'Re: July statement'
+        message['Message-ID'] = '<plain-1@example.test>'
+        message.set_content("I'll send the July statement on Friday.")
+        message.add_alternative(
+            '<p>I\'ll send the July statement on Friday.</p>', subtype='html')
+        parsed = parse_rfc822(message.as_bytes())
+        self.assertEqual(parsed.body, "I'll send the July statement on Friday.")
+        self.assertNotIn('<p>', parsed.body)
+
+    def test_html_only_decodes_entities_and_utf8_chinese(self):
+        message = EmailMessage()
+        message['From'] = 'Client <client@example.test>'
+        message['Subject'] = 'Re: July statement'
+        message['Message-ID'] = '<html-1@example.test>'
+        message.set_content(
+            '<html><body><p>请发送&nbsp;&gt; 七月对账单</p></body></html>',
+            subtype='html', charset='utf-8')
+        parsed = parse_rfc822(message.as_bytes())
+        self.assertIn('请发送', parsed.body)
+        self.assertIn('七月对账单', parsed.body)
+        self.assertIn('>', parsed.body)
+        self.assertNotIn('&nbsp;', parsed.body)
+        self.assertNotIn('&gt;', parsed.body)
+        self.assertNotIn('<p>', parsed.body)
+
+    def test_quoted_and_forwarded_history_is_trimmed(self):
+        quoted = EmailMessage()
+        quoted['From'] = 'Client <client@example.test>'
+        quoted['Subject'] = 'Re: July statement'
+        quoted['Message-ID'] = '<quoted-1@example.test>'
+        quoted.set_content(
+            "I'll send it Friday.\n\n"
+            "On Tue, 16 Sep 2026 at 10:00, Firm <firm@example.test> wrote:\n"
+            "> Please send the July statement.\n"
+            "> Thanks.\n")
+        parsed_quoted = parse_rfc822(quoted.as_bytes())
+        self.assertEqual(parsed_quoted.body, "I'll send it Friday.")
+        self.assertNotIn('Please send the July statement', parsed_quoted.body)
+
+        forwarded = EmailMessage()
+        forwarded['From'] = 'Client <client@example.test>'
+        forwarded['Subject'] = 'Fwd: July statement'
+        forwarded['Message-ID'] = '<fwd-1@example.test>'
+        forwarded.set_content(
+            "Please see below. I will send the pack tomorrow.\n\n"
+            "-----Forwarded message-----\n"
+            "From: Firm <firm@example.test>\n"
+            "Please upload the complete July statement.\n")
+        parsed_forwarded = parse_rfc822(forwarded.as_bytes())
+        self.assertIn('I will send the pack tomorrow.', parsed_forwarded.body)
+        self.assertNotIn('Please upload the complete July statement.', parsed_forwarded.body)
+
 
 class SmtpTransportTests(unittest.TestCase):
     def test_smtp_send_uses_injected_client_and_omits_internal_ids(self):
@@ -248,6 +303,8 @@ class LiveCommunicationStoreTests(unittest.TestCase):
             timed.deliver_outbox(self.actor, self.case.case_id, queued.outbox_id,
                 DeliverOutboxRequest(), 'timeout-live-2')
         self.assertEqual(raised.exception.code, 'ALREADY_DELIVERED')
+        tasks = timed.runtime.review_tasks(self.actor, self.case.case_id).items
+        self.assertTrue(any(task.reason_code == 'DELIVERY_UNKNOWN' for task in tasks))
 
     def test_failed_send_is_recorded(self):
         queued = self.approve_draft()
@@ -256,6 +313,8 @@ class LiveCommunicationStoreTests(unittest.TestCase):
             DeliverOutboxRequest(), 'fail-live')
         self.assertEqual(result.delivery_status, 'failed')
         self.assertIsNone(result.provider_message_id)
+        tasks = failing.runtime.review_tasks(self.actor, self.case.case_id).items
+        self.assertTrue(any(task.reason_code == 'DELIVERY_FAILED' for task in tasks))
 
     def test_inbound_uses_visible_reference_not_sender_alone(self):
         associated = self.db.process_inbound(inbound(

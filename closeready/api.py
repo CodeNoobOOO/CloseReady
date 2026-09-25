@@ -33,9 +33,10 @@ from .provider_factory import provider_from_environment
 from .health import HealthStatus
 from .communication_models import (
     AssessReplyRequest, AssessReplyResult, CommitmentPage, DeliverOutboxRequest,
-    DeliveryResult, DispatchRemindersResult, FindingPage, InboundPollResult,
-    InboundQuarantinePage, IngestReplyRequest, IngestReplyResult, MailboxPage,
-    ReminderPage, ReplyPage,
+    DeliveryRecoveryResult, DeliveryResult, DispatchRemindersResult, FindingPage,
+    InboundPollResult, InboundQuarantinePage, IngestReplyRequest,
+    IngestReplyResult, MailboxPage, ReconcileDeliveryRequest, ReminderPage,
+    ReplyPage, RetryDeliveryRequest,
 )
 from .communication_store import CommunicationStore
 from pathlib import Path
@@ -376,6 +377,17 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
                        body: DeliverOutboxRequest = DeliverOutboxRequest()):
         return communication.deliver_outbox(actor, case_id, outbox_id, body, key)
 
+    @app.post('/api/v1/cases/{case_id}/outbox/{outbox_id}/retry', response_model=DeliveryRecoveryResult)
+    def retry_outbox(case_id: str, outbox_id: str, body: RetryDeliveryRequest,
+                     actor: Actor, key: Key):
+        return communication.retry_outbox(actor, case_id, outbox_id, body, key)
+
+    @app.post('/api/v1/cases/{case_id}/outbox/{outbox_id}/reconcile',
+              response_model=DeliveryRecoveryResult)
+    def reconcile_outbox(case_id: str, outbox_id: str, body: ReconcileDeliveryRequest,
+                         actor: Actor, key: Key):
+        return communication.reconcile_outbox(actor, case_id, outbox_id, body, key)
+
     @app.get('/api/v1/cases/{case_id}/mailbox', response_model=MailboxPage)
     def list_mailbox(case_id: str, actor: Actor,
                      cursor: Annotated[str | None, Query(max_length=128)] = None,
@@ -418,6 +430,18 @@ def create_app(database_url: str, access: AccessConfig, provider: LLMProvider | 
     @app.post('/api/v1/cases/{case_id}/reminders/dispatch-due', response_model=DispatchRemindersResult)
     def dispatch_reminders(case_id: str, actor: Actor, key: Key):
         return communication.dispatch_due_reminders(actor, case_id, key)
+
+    @app.post('/api/v1/cases/{case_id}/reminders/{reminder_id}/retry',
+              response_model=DeliveryRecoveryResult)
+    def retry_reminder(case_id: str, reminder_id: str, body: RetryDeliveryRequest,
+                       actor: Actor, key: Key):
+        return communication.retry_reminder(actor, case_id, reminder_id, body, key)
+
+    @app.post('/api/v1/cases/{case_id}/reminders/{reminder_id}/reconcile',
+              response_model=DeliveryRecoveryResult)
+    def reconcile_reminder(case_id: str, reminder_id: str, body: ReconcileDeliveryRequest,
+                           actor: Actor, key: Key):
+        return communication.reconcile_reminder(actor, case_id, reminder_id, body, key)
 
     @app.post('/api/v1/inbound-mail/poll', response_model=InboundPollResult)
     def poll_inbound_mail(actor: Actor, key: Key):
