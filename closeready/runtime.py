@@ -36,6 +36,13 @@ def tool_definitions():
         ('propose_action', 'Propose one typed action; server binds IDs/version and enforces execution.', ProposeArgs)]]
 
 
+def parse_propose_args(arguments: str) -> ProposeArgs:
+    data = json.loads(arguments)
+    if isinstance(data, dict) and isinstance(data.get('action'), str):
+        data = {**data, 'action': json.loads(data['action'])}
+    return ProposeArgs.model_validate(data)
+
+
 class AgentRuntime:
     def __init__(self, db, provider: LLMProvider, max_steps=6, max_repairs=1, transient_retries=1):
         if not 1 <= max_steps <= 8 or not 0 <= max_repairs <= 2 or not 0 <= transient_retries <= 1:
@@ -107,7 +114,7 @@ class AgentRuntime:
                                 raise DomainError('CONTEXT_LIMIT', 'Case exceeds the context budget.', 422)
                             outcomes.append('context_loaded')
                         elif call.name == 'propose_action' and loaded_version is not None:
-                            args = ProposeArgs.model_validate_json(call.arguments)
+                            args = parse_propose_args(call.arguments)
                             result = self.db.apply(actor, run.run_id, token, args.action, loaded_version)
                             decision = result
                             outcomes.append(result['outcome'])

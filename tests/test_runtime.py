@@ -88,6 +88,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(case.state_version, 2)
         self.assertEqual(len(self.db.get_run(self.actor, result.run_id).traces), 3)
 
+    def test_string_encoded_action_is_validated_and_applied(self):
+        draft = self.draft()
+        action = json.loads(draft.calls[0].arguments)['action']
+        encoded = tool('propose_action', {'action': json.dumps(action)}, 'call-2')
+
+        result = self.run_with(ScriptedProvider([
+            tool('get_case_context', {}), encoded, final(),
+        ]))
+
+        self.assertEqual(result.status, 'needs_review')
+        tasks = self.db.review_tasks(self.actor, self.case.case_id).items
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].draft.subject, 'July statement')
+
     def test_rejected_document_context_is_exposed_as_untrusted_tool_data(self):
         observed = {}
 

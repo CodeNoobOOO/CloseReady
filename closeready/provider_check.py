@@ -1,7 +1,20 @@
 """Provider-independent native tool check using a fresh synthetic marker."""
 import json
+import re
 import secrets
 from .llm import LLMProvider, ProviderError
+
+
+def _parse_result(content: str) -> dict:
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError):
+        if not isinstance(content, str):
+            raise ValueError() from None
+        match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL | re.IGNORECASE)
+        if not match:
+            raise ValueError() from None
+        return json.loads(match.group(1))
 
 
 def check_provider(provider: LLMProvider) -> dict:
@@ -23,7 +36,7 @@ def check_provider(provider: LLMProvider) -> dict:
     messages.extend([first.message, {'role': 'tool', 'tool_call_id': call.call_id, 'content': json.dumps(result)}])
     final = provider.complete(messages, tools)
     try:
-        if final.calls or json.loads(final.message.get('content', '')) != result:
+        if final.calls or _parse_result(final.message.get('content', '')) != result:
             raise ValueError()
     except (TypeError, ValueError):
         raise ProviderError('TOOL_RESULT_CHECK_FAILED', False) from None
