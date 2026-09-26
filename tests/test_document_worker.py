@@ -570,7 +570,7 @@ class DocumentWorkerTests(unittest.TestCase):
             CreateCaseRequest.model_validate(payload),
             "document-worker-llm-case",
         )
-        
+
     def test_processor_uses_scripted_analyzer_path(self):
         llm_case = self.create_llm_case()
 

@@ -294,7 +294,7 @@ class LiveLLMDocumentAnalyzer:
         self,
         provider: LLMProvider,
         max_repairs: int = 1,
-        
+
     ):
         if max_repairs < 0:
             raise ValueError("max_repairs must be zero or greater.")
