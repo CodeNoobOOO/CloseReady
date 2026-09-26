@@ -14,6 +14,9 @@ function sandbox(){
   return context;
 }
 const run=(c,code)=>vm.runInContext(code,c);
+test('follow-up panel does not claim pause and resume are unsupported',()=>{
+  assert.doesNotMatch(source,/Follow-up pause\/resume is not yet supported/);
+});
 test('late response from previous case cannot replace current case',async()=>{
   const c=sandbox();let release;
   const slow=new Promise(resolve=>release=resolve);
@@ -251,6 +254,31 @@ test('case form rejects malformed bank account suffixes',()=>{
     period:'2026-09',entity:'entity_demo',bank_accounts:'12345',
     invoices:'',receipts:'',other:'',other_refs:''
   })`),/four digits/);
+});
+
+test('case form creates one requirement for each invoice and receipt reference',()=>{
+  const c=sandbox();
+  const requirements=run(c,`buildCaseRequirements({
+    period:'2026-09',entity:'entity_demo',bank_accounts:'',
+    invoices:'INV-001, INV-002',receipts:'REC-001, REC-002',
+    other:'Tax schedule',other_refs:'TAX-A,TAX-B'
+  })`);
+  const invoices=Array.from(requirements).filter(x=>x.document_type==='invoice');
+  const receipts=Array.from(requirements).filter(x=>x.document_type==='receipt');
+  const supporting=Array.from(requirements).filter(x=>x.document_type==='other_supporting_document');
+  assert.deepEqual(
+    invoices.map(x=>Array.from(x.completion_rule.expected_item_refs)),
+    [['INV-001'],['INV-002']]
+  );
+  assert.deepEqual(
+    receipts.map(x=>Array.from(x.completion_rule.expected_item_refs)),
+    [['REC-001'],['REC-002']]
+  );
+  assert.equal(invoices.every(x=>x.completion_rule.allow_multiple_documents===false),true);
+  assert.equal(receipts.every(x=>x.completion_rule.allow_multiple_documents===false),true);
+  assert.equal(supporting.length,1);
+  assert.deepEqual(Array.from(supporting[0].completion_rule.expected_item_refs),['TAX-A','TAX-B']);
+  assert.equal(supporting[0].completion_rule.allow_multiple_documents,true);
 });
 
 test('checklist shows masked account identifier instead of internal account reference',()=>{

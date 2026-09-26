@@ -137,6 +137,8 @@ MatchResult = Literal[
 class ExtractedPage(ContractModel):
     page: PositiveInt
     text: str
+    extraction_method: Literal["embedded_text", "ocr", "none"] = "embedded_text"
+    ocr_confidence: float | None = Field(default=None, ge=0, le=100)
 
 
 class DocumentExtraction(ContractModel):

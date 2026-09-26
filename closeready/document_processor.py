@@ -174,7 +174,9 @@ class DocumentProcessor:
     def execute_claimed(self, job_id: str, token: str) -> DocumentJobRecord:
         context = self.store.processing_context(job_id, token)
         if context.case.state_version != context.document.input_state_version:
-            return self.store.mark_stale(job_id, token)
+            context = self.store.refresh_claimed_processing_context(job_id, token)
+            if context is None:
+                return self.store.mark_stale(job_id, token)
         try:
             extraction = self.extractor(context.content)
         except ValueError:
@@ -183,7 +185,15 @@ class DocumentProcessor:
             return self.store.fail(job_id, token, "DOCUMENT_PROCESSING_FAILED")
 
         try:
-            if self.analyzer is None:
+            if not extraction.readable:
+                finding = self.assessor(
+                    case=context.case,
+                    document_id=context.document.document_id,
+                    extraction=extraction,
+                    requirement_id=context.document.requirement_id,
+                    duplicate=(context.document.duplicate_of_document_id is not None),
+                )
+            elif self.analyzer is None:
                 finding = self.assessor(
                     case=context.case,
                     document_id=context.document.document_id,

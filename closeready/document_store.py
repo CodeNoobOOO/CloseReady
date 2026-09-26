@@ -35,7 +35,7 @@ from .document_models import (
     DocumentUploadRequest,
 )
 from .models import CaseSnapshot
-from .store import DomainError, Store, cases, forbidden
+from .store import DomainError, Store, audit, cases, forbidden
 
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 
@@ -777,6 +777,93 @@ class DocumentStore:
                 content=document_row["content"],
             )
 
+    @staticmethod
+    def _document_only_version_drift(conn, case_id: str, old: int, new: int) -> bool:
+        """Allow rebasing only across successful automatic document updates."""
+        transitions: dict[int, set[str]] = {}
+        for raw in conn.execute(select(audit.c.record).where(
+                audit.c.case_id == case_id)).scalars():
+            record = json.loads(raw)
+            previous = record.get("old_state_version")
+            current = record.get("new_state_version")
+            if (
+                isinstance(previous, int)
+                and isinstance(current, int)
+                and current == previous + 1
+                and old <= previous < new
+            ):
+                transitions.setdefault(current, set()).add(record.get("action"))
+        return all(
+            transitions.get(version) == {"apply_document_finding"}
+            for version in range(old + 1, new + 1)
+        )
+
+    def refresh_claimed_processing_context(
+            self, job_id: str, token: str) -> DocumentProcessingContext | None:
+        """Refresh a claimed attachment after sibling documents changed the Case.
+
+        Other Case mutations retain the existing stale-state guard. A bound
+        document is also never refreshed after its Requirement is resolved.
+        """
+        with self.store.write() as conn:
+            row = conn.execute(
+                select(document_jobs).where(document_jobs.c.job_id == job_id)
+            ).mappings().one_or_none()
+            if (
+                row is None
+                or row["status"] != "processing"
+                or row["claim_token"] != token
+            ):
+                raise DomainError("INVALID_CLAIM", "Document job claim is invalid.", 409)
+            document_row = conn.execute(select(documents).where(
+                documents.c.document_id == row["document_id"]
+            )).mappings().one()
+            document = DocumentRecord.model_validate_json(document_row["record"])
+            case = CaseSnapshot.model_validate_json(conn.execute(
+                select(cases.c.snapshot).where(cases.c.case_id == row["case_id"])
+            ).scalar_one())
+            if case.state_version == document.input_state_version:
+                return DocumentProcessingContext(
+                    case=case, document=document, content=document_row["content"])
+            if not self._document_only_version_drift(
+                    conn, case.case_id, document.input_state_version, case.state_version):
+                return None
+            outstanding = {
+                requirement.requirement_id
+                for requirement in case.requirements
+                if requirement.status not in ("accepted", "waived")
+            }
+            if (
+                not outstanding
+                or (
+                    document.requirement_id is not None
+                    and document.requirement_id not in outstanding
+                )
+            ):
+                return None
+            refreshed = DocumentRecord.model_validate({
+                **document.model_dump(mode="json"),
+                "input_state_version": case.state_version,
+            })
+            self._replace_document(conn, refreshed)
+            self.store._audit(
+                conn,
+                self._system_actor(case),
+                "refresh_document_processing_context",
+                "executed",
+                "Queued attachment refreshed after sibling document processing.",
+                case,
+                old=case.state_version,
+                new=case.state_version,
+                details={
+                    "document_id": document.document_id,
+                    "previous_input_state_version": str(document.input_state_version),
+                    "current_input_state_version": str(case.state_version),
+                },
+            )
+            return DocumentProcessingContext(
+                case=case, document=refreshed, content=document_row["content"])
+
     def bind_claimed_requirement(
         self,
         job_id: str,
@@ -1051,6 +1138,32 @@ class DocumentStore:
                     ),
                     None,
                 )
+                coverage_satisfied = (
+                    requirement is not None
+                    and requirement.completion_rule.kind == "coverage"
+                    and finding.coverage_start is not None
+                    and finding.coverage_end is not None
+                    and requirement.scope.coverage_start is not None
+                    and requirement.scope.coverage_end is not None
+                    and finding.coverage_start <= requirement.scope.coverage_start
+                    and finding.coverage_end >= requirement.scope.coverage_end
+                )
+                expected_items_satisfied = (
+                    requirement is not None
+                    and requirement.document_type in ("invoice", "receipt")
+                    and requirement.completion_rule.kind == "explicit_items"
+                    and len(requirement.completion_rule.expected_item_refs) == 1
+                    and set(finding.matched_item_refs)
+                    == set(requirement.completion_rule.expected_item_refs)
+                    and finding.detected_period == requirement.accounting_period
+                    and all(
+                        any(
+                            expected.casefold() in evidence.excerpt.casefold()
+                            for evidence in finding.evidence_refs
+                        )
+                        for expected in requirement.completion_rule.expected_item_refs
+                    )
+                )
                 if (
                     requirement is None
                     or finding.requirement_id != requirement.requirement_id
@@ -1069,11 +1182,7 @@ class DocumentStore:
                         evidence.document_id != document.document_id
                         for evidence in finding.evidence_refs
                     )
-                    or requirement.completion_rule.kind != "coverage"
-                    or finding.coverage_start is None
-                    or finding.coverage_end is None
-                    or finding.coverage_start > requirement.scope.coverage_start
-                    or finding.coverage_end < requirement.scope.coverage_end
+                    or not (coverage_satisfied or expected_items_satisfied)
                 ):
                     raise DomainError(
                         "INVALID_DOCUMENT_RESULT",

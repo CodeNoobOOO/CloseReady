@@ -977,6 +977,169 @@ def assess_llm_analysis(
                 issues=["Expected-item matching requires human review."],
             )
 
+        if len(expected_items) != 1:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "Multiple expected item references require separate "
+                    "Requirements or human review."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Multiple expected items cannot be accepted automatically."],
+            )
+
+        if requirement.document_type not in ("invoice", "receipt"):
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "This supporting document type requires human review."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Supporting document matching is not automatically accepted."],
+            )
+
+        if matched_items != expected_items:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "The expected item reference was not matched exactly."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Expected-item matching requires human review."],
+            )
+
+        if analysis.detected_period is None:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=None,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=["Document period could not be verified."],
+                evidence_refs=evidence_refs,
+                issues=["Period verification requires human review."],
+            )
+
+        if analysis.detected_period != requirement.accounting_period:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_correction",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[],
+                evidence_refs=evidence_refs,
+                issues=[
+                    f"Document period {analysis.detected_period} does not match "
+                    f"required period {requirement.accounting_period}."
+                ],
+            )
+
+        if not evidence_refs:
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=["No valid document evidence was supplied."],
+                evidence_refs=[],
+                issues=["Evidence is required before satisfaction."],
+            )
+
+        expected_reference = next(iter(expected_items))
+        if not any(
+            expected_reference.casefold() in evidence.excerpt.casefold()
+            for evidence in analysis.evidence
+        ):
+            return DocumentFinding(
+                finding_id=finding_id,
+                responsibility="document_assessment",
+                case_id=case.case_id,
+                input_state_version=case.state_version,
+                document_id=document_id,
+                requirement_id=requirement.requirement_id,
+                result="needs_review",
+                detected_type=analysis.detected_type,
+                detected_period=analysis.detected_period,
+                entity_match=entity_match,
+                account_match=account_match,
+                coverage_start=analysis.coverage_start,
+                coverage_end=analysis.coverage_end,
+                matched_item_refs=analysis.matched_item_refs,
+                uncertainty_reasons=[
+                    "The matched item reference is not supported by cited evidence."
+                ],
+                evidence_refs=evidence_refs,
+                issues=["Reference evidence requires human review."],
+            )
+
         return DocumentFinding(
             finding_id=finding_id,
             responsibility="document_assessment",
@@ -984,7 +1147,7 @@ def assess_llm_analysis(
             input_state_version=case.state_version,
             document_id=document_id,
             requirement_id=requirement.requirement_id,
-            result="needs_review",
+            result="satisfies",
             detected_type=analysis.detected_type,
             detected_period=analysis.detected_period,
             entity_match=entity_match,
@@ -992,9 +1155,9 @@ def assess_llm_analysis(
             coverage_start=analysis.coverage_start,
             coverage_end=analysis.coverage_end,
             matched_item_refs=analysis.matched_item_refs,
-            uncertainty_reasons=["Explicit-item document matches require human review."],
+            uncertainty_reasons=[],
             evidence_refs=evidence_refs,
-            issues=["Expected-item matching is not automatically accepted."],
+            issues=[],
         )
 
     # 14. Evidence gate

@@ -314,6 +314,41 @@ class DocumentWorkerTests(unittest.TestCase):
 
         self.assertIs(processor.analyzer, analyzer)
 
+    def test_unreadable_ocr_result_bypasses_llm_and_requires_human_review(self):
+        job = self.queue()
+        token = self.documents.claim(job.job_id)
+        analyzer = ScriptedDocumentAnalyzer(LLMDocumentAnalysis(
+            detected_type="bank_statement",
+            entity_name="entity_demo",
+            account_identifier="1234",
+            detected_period="2026-07",
+            coverage_start=datetime(2026, 7, 1).date(),
+            coverage_end=datetime(2026, 7, 31).date(),
+            evidence=[],
+        ))
+        processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda _content: DocumentExtraction(
+                file_hash=calculate_file_hash(b"synthetic-pdf"),
+                page_count=1,
+                pages=[ExtractedPage(
+                    page=1,
+                    text="blurred OCR text",
+                    extraction_method="ocr",
+                    ocr_confidence=25.0,
+                )],
+                readable=False,
+            ),
+            analyzer=analyzer,
+        )
+
+        result = processor.execute_claimed(job.job_id, token)
+
+        self.assertEqual(result.status, "needs_review")
+        self.assertIsNone(analyzer.last_request)
+        current = self.store.get_case(self.actor, self.case.case_id)
+        self.assertEqual(current.requirements[0].status, "missing")
+
     def test_build_document_analysis_request_uses_authorised_context(self):
         case = self.store.get_case(
             self.actor,
@@ -716,6 +751,151 @@ class DocumentWorkerTests(unittest.TestCase):
         audit = self.store.audit_events(self.actor, llm_case.case_id, 0, 100)
         binding = next(item for item in audit.items if item.action == "bind_document_requirement")
         self.assertEqual(binding.details["match_source"], "unique_structured_match")
+
+    def test_processor_rebases_second_email_attachment_after_first_updates_case(self):
+        payload = case_request()
+        payload["requirements"][0]["scope"][
+            "masked_account_identifier"
+        ] = "****1234"
+        payload["requirements"].append({
+            "document_type": "invoice",
+            "accounting_period": "2026-07",
+            "scope": {
+                "entity_id": "entity_demo",
+                "account_ref": None,
+                "coverage_start": None,
+                "coverage_end": None,
+            },
+            "completion_rule": {
+                "kind": "explicit_items",
+                "expected_item_refs": ["INV-001"],
+                "allow_multiple_documents": False,
+            },
+        })
+        case = self.store.create_case(
+            self.actor,
+            CreateCaseRequest.model_validate(payload),
+            "multi-attachment-case",
+        )
+        bank_requirement, invoice_requirement = case.requirements
+        statement_content = b"statement-attachment"
+        invoice_content = b"invoice-attachment"
+        statement_job = self.documents.upload(
+            self.actor,
+            case.case_id,
+            requirement_id=None,
+            expected_state_version=case.state_version,
+            filename="statement.pdf",
+            media_type="application/pdf",
+            content=statement_content,
+            key="multi-attachment-statement",
+        )
+        invoice_job = self.documents.upload(
+            self.actor,
+            case.case_id,
+            requirement_id=None,
+            expected_state_version=case.state_version,
+            filename="invoice.pdf",
+            media_type="application/pdf",
+            content=invoice_content,
+            key="multi-attachment-invoice",
+        )
+        statement_token = self.documents.claim(statement_job.job_id)
+        statement_processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "DBS Bank Statement\nEntity ID: entity_demo\n"
+                    "Account ending in 1234\n"
+                    "Statement Period: 01 July 2026 to 31 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=ScriptedDocumentAnalyzer(LLMDocumentAnalysis(
+                detected_type="bank_statement",
+                entity_name="entity_demo",
+                account_identifier="Account ending in 1234",
+                detected_period="2026-07",
+                coverage_start=datetime(2026, 7, 1).date(),
+                coverage_end=datetime(2026, 7, 31).date(),
+                evidence=[
+                    LLMDocumentEvidence(
+                        field="account_identifier", page=1,
+                        excerpt="Account ending in 1234",
+                    ),
+                    LLMDocumentEvidence(
+                        field="coverage_start", page=1,
+                        excerpt="01 July 2026 to 31 July 2026",
+                    ),
+                ],
+            )),
+        )
+
+        first = statement_processor.execute_claimed(
+            statement_job.job_id, statement_token
+        )
+
+        self.assertEqual(first.status, "completed")
+        after_statement = self.store.get_case(self.actor, case.case_id)
+        self.assertEqual(after_statement.requirements[0].status, "accepted")
+        self.assertEqual(after_statement.requirements[1].status, "missing")
+        invoice_token = self.documents.claim(invoice_job.job_id)
+        invoice_analyzer = ScriptedDocumentAnalyzer(LLMDocumentAnalysis(
+            detected_type="invoice",
+            entity_name="entity_demo",
+            detected_period="2026-07",
+            invoice_number="INV-001",
+            matched_item_refs=["INV-001"],
+            evidence=[LLMDocumentEvidence(
+                field="invoice_number", page=1,
+                excerpt="Invoice Number: INV-001",
+            )],
+        ))
+        invoice_processor = DocumentProcessor(
+            self.documents,
+            extractor=lambda content: extracted(
+                text=(
+                    "Invoice\nEntity ID: entity_demo\n"
+                    "Invoice Number: INV-001\nInvoice Date: 15 July 2026"
+                ),
+                file_hash=calculate_file_hash(content),
+            ),
+            analyzer=invoice_analyzer,
+        )
+
+        second = invoice_processor.execute_claimed(
+            invoice_job.job_id, invoice_token
+        )
+
+        self.assertEqual(second.status, "completed")
+        invoice_document = self.documents.get_document(
+            self.actor, case.case_id, invoice_job.document_id
+        )
+        self.assertEqual(invoice_document.requirement_id, invoice_requirement.requirement_id)
+        self.assertEqual(invoice_document.input_state_version, after_statement.state_version)
+        self.assertEqual(invoice_document.status, "processed")
+        completed_case = self.store.get_case(self.actor, case.case_id)
+        self.assertEqual(completed_case.requirements[1].status, "accepted")
+        self.assertEqual(completed_case.readiness_status, "ready_for_confirmation")
+        self.assertIsNotNone(invoice_analyzer.last_request)
+        self.assertEqual(
+            [item.requirement_id for item in invoice_analyzer.last_request.candidate_requirements],
+            [invoice_requirement.requirement_id],
+        )
+        audit = self.store.audit_events(self.actor, case.case_id, 0, 100)
+        refreshed = next(
+            item for item in audit.items
+            if item.action == "refresh_document_processing_context"
+        )
+        self.assertEqual(refreshed.details["document_id"], invoice_job.document_id)
+        self.assertEqual(
+            refreshed.details["previous_input_state_version"],
+            str(case.state_version),
+        )
+        self.assertEqual(
+            refreshed.details["current_input_state_version"],
+            str(after_statement.state_version),
+        )
 
     def test_analysis_evidence_matches_real_page(self):
         extraction = extracted(

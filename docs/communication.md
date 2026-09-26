@@ -79,10 +79,12 @@ The access file must also contain:
 3. A document request becomes an open review task and increases `state_version`.
 4. `POST /api/v1/cases/{case_id}/review-decisions` lets the assigned manager approve, edit and approve, or reject the draft.
 5. Approval creates one outbox item. It still has not been sent.
-6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks outstanding items, the sending window and the customer-visible guard, attaches the Case reference, and invokes the configured backend.
+6. `POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver` resolves an approved contact, rechecks outstanding items, the sending window and the customer-visible guard, attaches the Case reference, and invokes the configured backend. A successful send schedules the first follow-up reminder under `min_reminder_interval_hours`.
 7. `GET /api/v1/cases/{case_id}/mailbox` lists the locally persisted delivery copy. `live=true` means SMTP was used; it is still not a bounce receipt.
 
-Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_status=delivery_unknown` and is not automatically retried. Other transport errors are `failed`.
+Delivery is blocked if the draft is unapproved or obsolete, the contact is missing or ambiguous, the current time is outside the approved sending window, or the request is not authorised. A timeout is recorded as `delivery_status=delivery_unknown` and opens an assigned review; it is not automatically retried. Other transport errors are `failed` and also open a review. A manager approves a new attempt after confirmed failure through `POST .../outbox/{outbox_id}/retry` (or the reminder retry route), which creates a new outbox item that must be delivered with a new Idempotency-Key. Unknown delivery is reconciled only through `.../reconcile`: confirm delivered, confirm not delivered and approve a new attempt, or keep unresolved. The application never automatically resends an unknown delivery. Only the Case owner or the delivery review's assignee can recover, and only while that review is open. The retry outbox references the resolved delivery review as its `review_task_id`, plus `retry_of_outbox_id` or `reminder_id` lineage. A reminder resend counts toward `max_reminders_per_requirement`.
+
+Inbound parsing prefers a valid `text/plain` MIME part. If only HTML is available, it is converted to readable plain text and HTML entities are decoded, including UTF-8 Chinese content. Quoted or forwarded history is trimmed where practical so the dashboard shows the client's reply rather than raw tags or entities.
 
 ## Reply, attachment and reminder flow
 
@@ -105,7 +107,7 @@ When the resolved Case has exactly one unresolved Requirement, the attachment is
 
 `POST /api/v1/cases/{case_id}/replies/{reply_id}/assess` is unchanged: the LLM may record a commitment; the application schedules a reminder after policy checks.
 
-`POST /api/v1/cases/{case_id}/reminders/dispatch-due` rechecks outstanding items, duplicate keys, interval/limit policy and the sending window, then sends due reminders through the same backend. Outcomes are `sent`, `failed` or `delivery_unknown`. Obsolete mixed-item reminders are cancelled rather than sent. When the worker is idle and mail is configured, it also polls inbound mail and dispatches due reminders.
+`POST /api/v1/cases/{case_id}/reminders/dispatch-due` rechecks outstanding items, duplicate keys, interval/limit policy, open overlapping reviews and the sending window, then sends due reminders through the same backend. If the client does not reply, chase continues on `min_reminder_interval_hours`. After a successful send it schedules the next chase reminder, or opens exactly one `REMINDER_LIMIT` review and stops when `max_reminders_per_requirement` is reached. Open dispute, waiver, clarification or limit reviews pause affected follow-up as `paused` so the worker does not keep a due reminder. A client reply from an approved contact also pauses scheduled reminders until it is assessed; the assessment then cancels and reschedules (commitment), keeps paused (review), defers by one interval (`document_submitted`) or resumes at the original time (other intents). Failed or unknown reminder delivery opens an assigned review and does not schedule the next chase. Outcomes are `sent`, `failed` or `delivery_unknown`. Obsolete mixed-item reminders are cancelled rather than sent. When the worker is idle and mail is configured, it also polls inbound mail and dispatches due reminders.
 
 ## Run the integrated sandbox demonstration
 
@@ -132,6 +134,6 @@ That script still uses `test_sink`. It never sends external email.
 - Personal SMTP/IMAP is not a dedicated transactional provider (SES, a firm mail gateway, bounce webhooks).
 - Due reminders can be dispatched by the worker or the explicit HTTP route; there is no separate multi-host scheduler.
 - Contact and policy administration still use a trusted configuration file rather than an administrative UI.
-- OCR and human resolution of ambiguous document findings remain Student 2/4 work.
+- Local OCR handles clearly scanned PDFs. Human resolution of low-confidence OCR and ambiguous document findings remains Student 2/4 work.
 
 A `test_sink` mailbox row is still not evidence that mail was sent. An SMTP `delivery_status=sent` means the provider accepted the message, not that the recipient read it.

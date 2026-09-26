@@ -147,6 +147,41 @@ class RuntimeStore:
         conn.execute(update(outbox).where(outbox.c.outbox_id == record.outbox_id).values(
             record=record.model_dump_json()))
 
+    def insert_outbox(self, conn, record):
+        conn.execute(insert(outbox).values(
+            outbox_id=record.outbox_id, case_id=record.case_id,
+            review_task_id=record.review_task_id, record=record.model_dump_json()))
+
+    def review_by_key(self, conn, case_id, key):
+        """Policy review for a case/key, whichever actor's transaction created it."""
+        found = None
+        for run_id in conn.execute(select(runs.c.run_id).where(
+                runs.c.case_id == case_id, runs.c.key == key)).scalars():
+            raw = conn.execute(select(reviews.c.record).where(
+                reviews.c.run_id == run_id)).scalar_one_or_none()
+            if raw is None:
+                continue
+            task = ReviewTaskRecord.model_validate_json(raw)
+            if task.status == 'open':
+                return task
+            found = found or task
+        return found
+
+    def resolve_review(self, conn, actor, task, resolution, reason):
+        if task.status != 'open':
+            raise DomainError('REVIEW_ALREADY_RESOLVED', 'Review task is already resolved.', 409)
+        resolved = ReviewTaskRecord.model_validate({
+            **task.model_dump(mode='json'),
+            'status': 'resolved', 'resolution': resolution,
+            'resolved_by': actor.user_id, 'resolved_at': now(),
+            'resolution_reason': reason, 'approved_draft': None,
+        })
+        conn.execute(update(reviews).where(
+            reviews.c.review_task_id == task.review_task_id).values(
+                record=resolved.model_dump_json()))
+        self._close_run(conn, task.run_id, 'resolved')
+        return resolved
+
     def create_policy_review(self, conn, actor, case, reason_code, reason, requirement_ids, key):
         """Assigned review from communication policy. Completes without calling a provider."""
         existing = conn.execute(select(runs).where(runs.c.actor_id == actor.user_id,

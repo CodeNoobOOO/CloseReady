@@ -6,6 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 10001 closeready \
     && useradd --uid 10001 --gid closeready --no-create-home --home-dir /app --shell /usr/sbin/nologin closeready \
     && mkdir -p /data \

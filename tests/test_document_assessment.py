@@ -365,6 +365,236 @@ def test_llm_analysis_satisfies_fully_verified_bank_statement():
     assert len(finding.evidence_refs) == 3
 
 
+def test_llm_analysis_satisfies_single_exact_invoice_reference():
+    data = make_case().model_dump(mode="json")
+    data["requirements"] = [{
+        **data["requirements"][0],
+        "requirement_id": "req_invoice_001",
+        "document_type": "invoice",
+        "scope": {
+            "entity_id": "entity_demo",
+            "account_ref": None,
+            "masked_account_identifier": None,
+            "coverage_start": None,
+            "coverage_end": None,
+        },
+        "completion_rule": {
+            "kind": "explicit_items",
+            "expected_item_refs": ["INV-001"],
+            "allow_multiple_documents": False,
+        },
+    }]
+    case = CaseSnapshot.model_validate(data)
+    analysis = LLMDocumentAnalysis(
+        detected_type="invoice",
+        entity_name="entity_demo",
+        detected_period="2026-07",
+        invoice_number="INV-001",
+        invoice_date=date(2026, 7, 15),
+        matched_item_refs=["INV-001"],
+        evidence=[
+            LLMDocumentEvidence(
+                field="entity_name", page=1,
+                excerpt="Entity ID: entity_demo",
+            ),
+            LLMDocumentEvidence(
+                field="invoice_number", page=1,
+                excerpt="Invoice Number: INV-001",
+            ),
+        ],
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_invoice_001",
+        analysis=analysis,
+        requirement_id="req_invoice_001",
+    )
+
+    assert finding.result == "satisfies"
+    assert finding.matched_item_refs == ["INV-001"]
+    assert finding.uncertainty_reasons == []
+    assert finding.issues == []
+
+
+def test_llm_analysis_satisfies_single_exact_receipt_reference():
+    data = make_case().model_dump(mode="json")
+    data["requirements"] = [{
+        **data["requirements"][0],
+        "requirement_id": "req_receipt_001",
+        "document_type": "receipt",
+        "scope": {
+            "entity_id": "entity_demo",
+            "account_ref": None,
+            "masked_account_identifier": None,
+            "coverage_start": None,
+            "coverage_end": None,
+        },
+        "completion_rule": {
+            "kind": "explicit_items",
+            "expected_item_refs": ["REC-001"],
+            "allow_multiple_documents": False,
+        },
+    }]
+    case = CaseSnapshot.model_validate(data)
+    analysis = LLMDocumentAnalysis(
+        detected_type="receipt",
+        entity_name="entity_demo",
+        detected_period="2026-07",
+        receipt_number="REC-001",
+        matched_item_refs=["REC-001"],
+        evidence=[
+            LLMDocumentEvidence(
+                field="entity_name", page=1,
+                excerpt="Entity ID: entity_demo",
+            ),
+            LLMDocumentEvidence(
+                field="receipt_number", page=1,
+                excerpt="Receipt Number: REC-001",
+            ),
+        ],
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_receipt_001",
+        analysis=analysis,
+        requirement_id="req_receipt_001",
+    )
+
+    assert finding.result == "satisfies"
+    assert finding.matched_item_refs == ["REC-001"]
+
+
+def test_llm_analysis_rejects_exact_invoice_reference_from_wrong_period():
+    data = make_case().model_dump(mode="json")
+    data["requirements"] = [{
+        **data["requirements"][0],
+        "requirement_id": "req_invoice_001",
+        "document_type": "invoice",
+        "scope": {
+            "entity_id": "entity_demo",
+            "account_ref": None,
+            "masked_account_identifier": None,
+            "coverage_start": None,
+            "coverage_end": None,
+        },
+        "completion_rule": {
+            "kind": "explicit_items",
+            "expected_item_refs": ["INV-001"],
+            "allow_multiple_documents": False,
+        },
+    }]
+    case = CaseSnapshot.model_validate(data)
+    analysis = LLMDocumentAnalysis(
+        detected_type="invoice",
+        entity_name="entity_demo",
+        detected_period="2026-08",
+        invoice_number="INV-001",
+        matched_item_refs=["INV-001"],
+        evidence=[LLMDocumentEvidence(
+            field="invoice_number", page=1,
+            excerpt="Invoice Number: INV-001",
+        )],
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_invoice_wrong_period",
+        analysis=analysis,
+        requirement_id="req_invoice_001",
+    )
+
+    assert finding.result == "needs_correction"
+    assert "period" in finding.issues[0].lower()
+
+
+def test_llm_analysis_requires_evidence_for_exact_invoice_reference():
+    data = make_case().model_dump(mode="json")
+    data["requirements"] = [{
+        **data["requirements"][0],
+        "requirement_id": "req_invoice_001",
+        "document_type": "invoice",
+        "scope": {
+            "entity_id": "entity_demo",
+            "account_ref": None,
+            "masked_account_identifier": None,
+            "coverage_start": None,
+            "coverage_end": None,
+        },
+        "completion_rule": {
+            "kind": "explicit_items",
+            "expected_item_refs": ["INV-001"],
+            "allow_multiple_documents": False,
+        },
+    }]
+    case = CaseSnapshot.model_validate(data)
+    analysis = LLMDocumentAnalysis(
+        detected_type="invoice",
+        entity_name="entity_demo",
+        detected_period="2026-07",
+        invoice_number="INV-001",
+        matched_item_refs=["INV-001"],
+        evidence=[LLMDocumentEvidence(
+            field="entity_name", page=1,
+            excerpt="Entity ID: entity_demo",
+        )],
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_invoice_missing_reference_evidence",
+        analysis=analysis,
+        requirement_id="req_invoice_001",
+    )
+
+    assert finding.result == "needs_review"
+    assert "evidence" in finding.issues[0].lower()
+
+
+def test_llm_analysis_keeps_multi_reference_invoice_for_human_review():
+    data = make_case().model_dump(mode="json")
+    data["requirements"] = [{
+        **data["requirements"][0],
+        "requirement_id": "req_invoice_batch",
+        "document_type": "invoice",
+        "scope": {
+            "entity_id": "entity_demo",
+            "account_ref": None,
+            "masked_account_identifier": None,
+            "coverage_start": None,
+            "coverage_end": None,
+        },
+        "completion_rule": {
+            "kind": "explicit_items",
+            "expected_item_refs": ["INV-001", "INV-002"],
+            "allow_multiple_documents": True,
+        },
+    }]
+    case = CaseSnapshot.model_validate(data)
+    analysis = LLMDocumentAnalysis(
+        detected_type="invoice",
+        entity_name="entity_demo",
+        detected_period="2026-07",
+        invoice_number="INV-001",
+        matched_item_refs=["INV-001"],
+        evidence=[LLMDocumentEvidence(
+            field="invoice_number", page=1,
+            excerpt="Invoice Number: INV-001",
+        )],
+    )
+
+    finding = assess_llm_analysis(
+        case=case,
+        document_id="document_invoice_batch",
+        analysis=analysis,
+        requirement_id="req_invoice_batch",
+    )
+
+    assert finding.result == "needs_review"
+    assert "multiple" in finding.uncertainty_reasons[0].lower()
+
+
 def test_llm_bank_analysis_ignores_uncertainty_resolved_by_verified_fields():
     case = make_llm_case()
     analysis = make_valid_llm_bank_analysis().model_copy(update={

@@ -9,6 +9,8 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from email.utils import getaddresses, parsedate_to_datetime
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -129,31 +131,109 @@ def _decoded_payload(part: Message) -> bytes:
     return payload
 
 
-def _plain_body(message: Message) -> str:
-    if message.get_content_maintype() == 'text' and message.get_content_subtype() == 'plain':
-        payload = _decoded_payload(message)
-        charset = message.get_content_charset() or 'utf-8'
-        try:
-            text = payload.decode(charset, errors='replace')
-        except LookupError:
-            text = payload.decode('utf-8', errors='replace')
-        return text.strip()
+class _HTMLToText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style', 'head'):
+            self._skip += 1
+            return
+        if tag in ('br', 'p', 'div', 'tr', 'li', 'h1', 'h2', 'h3', 'blockquote'):
+            self._chunks.append('\n')
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style', 'head') and self._skip:
+            self._skip -= 1
+        if tag in ('p', 'div', 'tr', 'li', 'blockquote'):
+            self._chunks.append('\n')
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        raw = ''.join(self._chunks).replace('\xa0', ' ')
+        raw = re.sub(r'[ \t]+', ' ', raw)
+        return re.sub(r'\n{3,}', '\n\n', raw).strip()
+
+
+def html_to_text(value: str) -> str:
+    parser = _HTMLToText()
+    try:
+        parser.feed(value)
+        parser.close()
+        text = parser.text()
+    except Exception:
+        text = unescape(re.sub(r'<[^>]+>', ' ', value)).replace('\xa0', ' ')
+    return text.strip()
+
+
+def _decode_text_part(part: Message) -> str:
+    payload = _decoded_payload(part)
+    charset = part.get_content_charset() or 'utf-8'
+    try:
+        text = payload.decode(charset, errors='replace')
+    except LookupError:
+        text = payload.decode('utf-8', errors='replace')
+    return unescape(text).replace('\xa0', ' ')
+
+
+def _first_body_part(message: Message, content_type: str) -> Message | None:
+    if (message.get_content_type() == content_type
+            and message.get_content_disposition() != 'attachment'):
+        return message
     if message.is_multipart():
         for part in message.walk():
             if part.get_content_maintype() == 'multipart':
                 continue
             if part.get_content_disposition() == 'attachment':
                 continue
-            if part.get_content_type() == 'text/plain':
-                payload = _decoded_payload(part)
-                charset = part.get_content_charset() or 'utf-8'
-                try:
-                    text = payload.decode(charset, errors='replace')
-                except LookupError:
-                    text = payload.decode('utf-8', errors='replace')
-                if text.strip():
-                    return text.strip()
-    return ''
+            if part.get_content_type() == content_type:
+                return part
+    return None
+
+
+def trim_quoted_history(text: str) -> str:
+    """Keep the client reply and drop forwarded/quoted history where practical."""
+    lines = text.replace('\r\n', '\n').split('\n')
+    cut = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == '--' or stripped == '-- ':
+            cut = index
+            break
+        if stripped.startswith('-----Original Message-----'):
+            cut = index
+            break
+        if stripped.lower().startswith('-----forwarded message'):
+            cut = index
+            break
+        if re.match(r'^On .+ wrote:\s*$', stripped):
+            cut = index
+            break
+        if (stripped.startswith('From:') and index + 1 < len(lines)
+                and lines[index + 1].strip().startswith('Sent:')):
+            cut = index
+            break
+    kept = lines[:cut]
+    while kept and kept[-1].lstrip().startswith('>'):
+        kept.pop()
+    return '\n'.join(kept).strip()
+
+
+def readable_body(message: Message) -> str:
+    plain = _first_body_part(message, 'text/plain')
+    if plain is not None:
+        text = _decode_text_part(plain)
+    else:
+        html_part = _first_body_part(message, 'text/html')
+        if html_part is None:
+            return ''
+        text = html_to_text(_decode_text_part(html_part))
+    return trim_quoted_history(text)
 
 
 def _is_pdf_part(part: Message, filename: str) -> bool:
@@ -214,7 +294,7 @@ def parse_rfc822(raw: bytes, *, mailbox_uid: str | None = None) -> InboundMail:
     if received_at.tzinfo is None:
         received_at = received_at.replace(tzinfo=timezone.utc)
     subject = parsed.get('Subject') or 'No subject'
-    body = _plain_body(parsed) or EMPTY_BODY
+    body = readable_body(parsed) or EMPTY_BODY
     in_reply_to = _header_ids(parsed.get('In-Reply-To'))
     references = _header_ids(parsed.get('References'))
     return InboundMail(

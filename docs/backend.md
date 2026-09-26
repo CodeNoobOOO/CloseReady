@@ -102,7 +102,7 @@ Then run `examples/upload-document.ps1` from the API terminal. Supply the curren
     -ExpectedStateVersion $createdCase.state_version -PdfPath 'C:/temp/july-statement.pdf'
 ```
 
-The script queues the upload, polls its job and reads the finding and current Case. A `completed` job means the application accepted verified evidence. `needs_review`, `failed` and `stale` leave the requirement unresolved. This increment accepts only non-empty `application/pdf` uploads up to 5 MiB and only extracts embedded text; scanned PDFs require future OCR and manual review.
+The script queues the upload, polls its job and reads the finding and current Case. A `completed` job means the application accepted verified evidence. `needs_review`, `failed` and `stale` leave the requirement unresolved. Uploads remain limited to non-empty `application/pdf` files up to 5 MiB. The worker prefers embedded text and falls back to local Tesseract OCR for image-only PDFs. Low-confidence, partial or over-limit OCR leaves the Requirement unresolved for human review.
 
 ## Available routes
 
@@ -130,6 +130,8 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | POST /api/v1/cases/{case_id}/review-decisions | Resolve assigned draft/error review; may create reviewed outbox | Assigned manager |
 | GET /api/v1/cases/{case_id}/outbox | Scoped reviewed messages | Actor with client grant |
 | POST /api/v1/cases/{case_id}/outbox/{outbox_id}/deliver | Deliver an approved outbox item | Assigned manager; `test_sink` or `smtp` |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/retry | Create a new outbox item after confirmed failed delivery | Assigned manager; current state |
+| POST /api/v1/cases/{case_id}/outbox/{outbox_id}/reconcile | Confirm, retry or leave unresolved an unknown delivery | Assigned manager; current state |
 | GET /api/v1/cases/{case_id}/mailbox | Locally persisted delivery copies | Actor with client grant; mail enabled |
 | POST /api/v1/inbound-mail/poll | Poll IMAP/test inbox and associate replies | Manager; mail enabled |
 | GET /api/v1/inbound-mail/quarantine | Unmatched inbound mail | Manager |
@@ -140,6 +142,8 @@ The script queues the upload, polls its job and reads the finding and current Ca
 | GET /api/v1/cases/{case_id}/commitments | Recorded commitments | Actor with client grant |
 | GET /api/v1/cases/{case_id}/reminders | Follow-up schedule | Actor with client grant |
 | POST /api/v1/cases/{case_id}/reminders/dispatch-due | Dispatch due reminders | Manager; `test_sink` or `smtp` |
+| POST /api/v1/cases/{case_id}/reminders/{reminder_id}/retry | Create a new outbox item after a failed reminder send | Assigned manager; current state |
+| POST /api/v1/cases/{case_id}/reminders/{reminder_id}/reconcile | Confirm, retry or leave unresolved an unknown reminder | Assigned manager; current state |
 
 List endpoints accept limit=1..100 (default 50). Pass next_cursor back unchanged. Case cursors are case IDs sorted lexically; audit cursors are increasing audit IDs. New insertions before a case cursor may require a fresh listing. Mutations require an Idempotency-Key of 1..128 letters, digits or `._:-`. Document upload also requires multipart fields `file`, `expected_state_version` and optional `requirement_id`. Keys are scoped by actor and operation. Replays preserve the original response, which may be older than the current case; GET the case for current state.
 
@@ -163,7 +167,7 @@ Schema version 1 initializes a new database; future migrations require an explic
 
 Tests use real file-backed SQLite transactions and the ASGI HTTP boundary, including restart/reopen, concurrent writes, rollback, idempotency and access denial. They do not prove deployed network access, LLM business accuracy or delivery behavior.
 
-The repository now includes a non-root image and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime now queues and recovers analysis and document work, stores deterministic PDF findings, supports audited human document decisions and readiness confirmation, and can deliver a reviewed request through `test_sink` or live SMTP when configured. A complete business workflow still needs OCR and richer document rules, bounce reconciliation and an actual Lightsail deployment.
+The repository now includes a non-root image with Tesseract and a single-host Compose topology that runs the API and `python -m closeready.worker` as separately supervised services against one persistent volume. See the [deployment runbook](../deploy/README.md). The application has not yet been deployed to Lightsail: external assessment still requires TLS termination, firewall rules, host secret provisioning, encrypted off-host backups and a deployed restart test. The runtime queues and recovers analysis and document work, stores PDF/OCR findings, supports audited human document decisions and readiness confirmation, and can deliver a reviewed request through `test_sink` or live SMTP when configured. A complete business workflow still needs richer document rules, bounce reconciliation and an actual Lightsail deployment.
 
 ## Undo final readiness confirmation
 
