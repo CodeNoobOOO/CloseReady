@@ -21,7 +21,7 @@ async function loadCases(){
     const cases=await pages('/cases');
     if(token!==state.token)return;
     state.cases=cases;
-    $('cases').innerHTML=cases.map(c=>`<button class="case ${state.selected===c.case_id?'active':''}" data-case="${esc(c.case_id)}"><b>${esc(c.client_id)}</b><small>${esc(c.accounting_period)} · ${esc(c.readiness_status)}</small><small>Case …${esc(c.case_id.slice(-6))}</small></button>`).join('')||'<p class="muted">No cases in your scope.</p>';
+    $('cases').innerHTML=cases.map(c=>`<button class="case ${state.selected===c.case_id?'active':''}" data-case="${esc(c.case_id)}"><b>${esc(c.title || `${c.client_id} · ${c.accounting_period}`)}</b><small>${esc(c.client_id)} · ${esc(c.accounting_period)} · ${esc(c.readiness_status)}</small><small>Case …${esc(c.case_id.slice(-6))}</small></button>`).join('')||'<p class="muted">No cases in your scope.</p>';
   } catch(e){notice(e.message)}
 }
 async function loadCase(id, quiet=false){
@@ -71,7 +71,7 @@ function renderChecklist(requirements) {
   }).join('');
 }
 function render(){const {caseData:c,reviews,outbox,audit,findings,commitments,reminders,replies,mailbox,runs}=state.data;
- $('workspace').innerHTML=`<div class="top"><div><h1>${esc(c.client_id)} · ${esc(c.accounting_period)}</h1><p class="meta">${esc(c.case_id)} · version ${c.state_version} · owner ${esc(c.owner_user_id)} · due ${when(c.due_at)}</p></div>${pill(c.readiness_status)}</div>${renderOverview()}
+ $('workspace').innerHTML=`<div class="top"><div><h1>${esc(c.title || `${c.client_id} · ${c.accounting_period}`)}</h1><p class="meta">${esc(c.client_id)} · ${esc(c.accounting_period)} · ${esc(c.case_id)} · version ${c.state_version} · owner ${esc(c.owner_user_id)} · due ${when(c.due_at)}</p></div>${pill(c.readiness_status)}</div>${renderOverview()}
  <div class="grid"><div class="panel"><h2>Document checklist</h2><p class="muted">A tick means the required documents have been accepted.</p>${renderChecklist(c.requirements)}</div>
  <div class="panel"><h2>Human review <span class="muted">${reviews.filter(x=>x.status==='open').length} open</span></h2>${reviews.map(t=>`<div class="row"><div class="row-head"><b>${esc(t.reason_code)}</b>${pill(t.status)}</div><div class="detail">${esc(t.reason)} · assigned ${esc(t.assigned_to)} · ${when(t.created_at)}</div>${t.draft?`<pre>Subject: ${esc(t.draft.subject)}\n\n${esc(t.draft.body)}</pre>`:''}${t.status==='open'?`<div class="actions">${t.draft?`<button data-review="approve_draft" data-id="${esc(t.review_task_id)}">Approve draft</button><button class="secondary" data-review="edit_and_approve" data-id="${esc(t.review_task_id)}">Edit & approve</button><button class="secondary" data-review="reject_draft" data-id="${esc(t.review_task_id)}">Reject</button>`:`<button class="secondary" data-review="dismiss_error" data-id="${esc(t.review_task_id)}">Dismiss error</button>`}</div>`:''}</div>`).join('')||'<p class="muted">No review tasks.</p>'}<p class="muted">Open reviews pause affected follow-up reminders until a manager resolves them.</p></div>
  ${renderDocuments()}
@@ -127,7 +127,7 @@ async function mutation(path,body,method='POST',{throwOnError=false}={}){
 }
 function promptFormMarkup(fields){
   return `<form>${fields.map(f=>{
-    const attrs=`id="f-${esc(f.name)}" name="${esc(f.name)}" ${f.optional?'':'required'}`;
+    const attrs=`id="f-${esc(f.name)}" name="${esc(f.name)}" ${f.optional?'':'required'}${f.maxLength?` maxlength="${esc(f.maxLength)}"`:''}`;
     const input=f.options ? `<select ${attrs}>${f.options.map(o=>`<option value="${esc(o.value)}" ${o.value===f.value?'selected':''}>${esc(o.label)}</option>`).join('')}</select>` : f.multiline ? `<textarea ${attrs}>${esc(f.value||'')}</textarea>` : `<input ${attrs} type="${f.type||'text'}" ${f.type==='file'?'accept="application/pdf,.pdf"':`value="${esc(f.value||'')}"`}>`;
     return `<div class="form-field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${input}${f.help?`<div class="field-help">${esc(f.help)}</div>`:''}<div class="field-error" data-field-error="${esc(f.name)}" role="alert" hidden></div></div>`;
   }).join('')}<div class="form-error" data-form-error role="alert" hidden></div><menu><button type="button" data-dialog-cancel class="secondary">Cancel</button><button type="submit">Continue</button></menu></form>`;
@@ -368,6 +368,9 @@ function buildCaseRequirements(values){
 }
 
 function caseFormErrors(values){
+  const title=String(values.title || '').trim();
+  if(!title)return {title:'Enter a case title.'};
+  if(title.length>120)return {title:'Case title must be 120 characters or fewer.'};
   try{buildCaseRequirements(values);return {}}
   catch(error){return {[error.field || '_form']:error.message}}
 }
@@ -375,6 +378,7 @@ function caseFormErrors(values){
 async function createCaseForm(){
   if(!state.token){notice('Connect before creating a case.');return;}
   const created=await promptFields('Create client-period checklist',[
+    {name:'title',label:'Case title',maxLength:120},
     {name:'client',label:'Client ID'}, {name:'owner',label:'Manager user ID'},
     {name:'policy',label:'Approved policy ID'}, {name:'period',label:'Accounting period',type:'month'},
     {name:'timezone',label:'Business timezone',value:Intl.DateTimeFormat().resolvedOptions().timeZone},
@@ -387,7 +391,7 @@ async function createCaseForm(){
     {name:'other_refs',label:'Required references for other documents (optional)',optional:true},
   ],{validate:caseFormErrors,submit:async values=>{
     const requirements=buildCaseRequirements(values);
-    return mutation('/cases',{client_id:values.client,owner_user_id:values.owner,policy_id:values.policy,accounting_period:values.period,timezone:values.timezone,due_at:new Date(values.due).toISOString(),requirements},'POST',{throwOnError:true});
+    return mutation('/cases',{title:values.title.trim(),client_id:values.client,owner_user_id:values.owner,policy_id:values.policy,accounting_period:values.period,timezone:values.timezone,due_at:new Date(values.due).toISOString(),requirements},'POST',{throwOnError:true});
   }});
   if(created)await loadCase(created.case_id);
 }

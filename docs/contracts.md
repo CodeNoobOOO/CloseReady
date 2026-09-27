@@ -137,7 +137,7 @@ Internal table layouts are not public contracts. The first implementation can us
 
 ## Case snapshot
 
-Required fields: case_id, client_id, accounting_period, timezone, state_version, readiness_status, owner_user_id, due_at, policy_id, policy_version, requirements.
+Required fields: case_id, client_id, accounting_period, timezone, state_version, readiness_status, owner_user_id, due_at, policy_id, policy_version and requirements. New Cases also carry a manager-supplied title of 1 to 120 characters; legacy snapshots may return title=null and clients should fall back to client plus period.
 
 Each requirement contains requirement_id, document_type, accounting_period, status, evidence_refs, scope, completion_rule, reviewer_status. Initial document types: bank_statement, invoice, receipt, other_supporting_document; the last requires a configured description and acceptance rule.
 
@@ -278,7 +278,7 @@ All routes below have prefix /api/v1. Case creation/listing/retrieval, document 
 | POST /cases/{case_id}/reminders/{reminder_id}/reconcile | Reconcile an unknown reminder delivery without auto-resend | 200: recovery result |
 | GET /cases/{case_id}/commitments | Client commitments | 200: items and next_cursor |
 
-Case creation takes client_id, accounting_period, timezone, owner_user_id, due_at, policy_id and requirement definitions. Validate owner access and persist the selected policy version. The backend supplies case IDs, versions and initial statuses. Do not accept caller-supplied readiness or reviewer approval.
+Case creation takes title, client_id, accounting_period, timezone, owner_user_id, due_at, policy_id and requirement definitions. Validate owner access and persist the selected policy version. The backend supplies case IDs, versions and initial statuses. Do not accept caller-supplied readiness or reviewer approval.
 
 Document upload creates document and job records and returns 202 only after durable file registration. Job status remains queued until extraction succeeds or a failure is recorded. A scoped client upload session must bind the authorised client/case server-side and cannot grant review permissions. Contact/policy provisioning may use an administrator-managed seed/import in the MVP; its trusted configuration is not editable by the model.
 

@@ -96,6 +96,7 @@ class CaseApiTests(unittest.TestCase):
 
     def test_create_read_and_server_owned_initial_state(self):
         case = self.create()
+        self.assertEqual(case['title'], 'July close - operating account')
         self.assertEqual(case['state_version'], 1)
         self.assertEqual(case['readiness_status'], 'collecting')
         self.assertEqual(case['requirements'][0]['status'], 'missing')
@@ -104,6 +105,33 @@ class CaseApiTests(unittest.TestCase):
         self.assertEqual(case['policy_version'], 1)
         got = self.client.get('/api/v1/cases/' + case['case_id'], headers=self.headers)
         self.assertEqual(got.json(), case)
+
+    def test_create_requires_a_bounded_case_title(self):
+        for title in (None, '   ', 'x' * 121):
+            payload = case_request()
+            if title is None:
+                payload.pop('title')
+            else:
+                payload['title'] = title
+
+            response = self.client.post(
+                '/api/v1/cases', json=payload,
+                headers=dict(self.headers, **{'Idempotency-Key': 'title-' + str(len(title or ''))}))
+
+            self.assertEqual(response.status_code, 422, response.text)
+
+    def test_legacy_case_snapshot_without_title_remains_readable(self):
+        case = self.create()
+        legacy = dict(case)
+        legacy.pop('title')
+        with self.app.state.store.engine.begin() as conn:
+            conn.execute(update(cases).where(cases.c.case_id == case['case_id']).values(
+                snapshot=json.dumps(legacy)))
+
+        response = self.client.get('/api/v1/cases/' + case['case_id'], headers=self.headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()['title'])
 
     def test_create_bank_requirement_requires_account_suffix(self):
         payload = case_request()

@@ -14,6 +14,8 @@ from pydantic import (
 )
 
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, pattern=r'\S')]
+CaseTitle = Annotated[str, StringConstraints(
+    strict=True, strip_whitespace=True, min_length=1, max_length=120, pattern=r'\S')]
 Period = Annotated[str, StringConstraints(strict=True, pattern=r'^\d{4}-(0[1-9]|1[0-2])$')]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
@@ -125,6 +127,7 @@ class Requirement(ContractModel):
 
 class CaseSnapshot(ContractModel):
     case_id: Text
+    title: CaseTitle | None = None
     client_id: Text
     accounting_period: Period
     timezone: TimezoneName
