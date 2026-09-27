@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from closeready.llm import DeepSeekProvider, LLMProvider, OpenAICompatibleProvider
+from closeready.llm import DeepSeekProvider, LLMProvider, OllamaGatewayProvider, OpenAICompatibleProvider
 from closeready.provider_factory import provider_from_environment
 
 
@@ -32,6 +32,17 @@ class ProviderConfigurationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 provider_from_environment()
         self.assertNotIn('do-not-leak', str(caught.exception))
+
+    def test_factory_selects_ollama_gateway_without_legacy_key_fallback(self):
+        with patch.dict('os.environ', {'LLM_PROVIDER': 'ollama_gateway',
+            'LLM_API_KEY': 'gateway-key', 'LLM_MODEL': 'team-model',
+            'LLM_BASE_URL': 'https://api.softwaresystems.app',
+            'DEEPSEEK_API_KEY': 'must-not-use-this'}, clear=True):
+            provider = provider_from_environment()
+        self.assertIsInstance(provider, OllamaGatewayProvider)
+        self.assertIsInstance(provider, LLMProvider)
+        self.assertEqual(provider.provider_name, 'ollama_gateway')
+        self.assertEqual(provider.model, 'team-model')
 
     def test_environment_overrides_file_and_unknown_provider_fails(self):
         with TemporaryDirectory() as directory:

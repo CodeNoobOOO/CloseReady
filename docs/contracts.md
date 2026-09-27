@@ -69,7 +69,7 @@ Status: core models, case API, durable PDF ingestion with local OCR fallback, de
 
 ## v0.5 analysis runtime increment
 
-Provider selection is server configuration, not a business request field. Core code consumes LLMProvider and supports deepseek plus a Chat Completions-compatible adapter; see [provider guide](llm-providers.md) for capability checks and verification status. These configuration changes do not change case/action wire formats.
+Provider selection is server configuration, not a business request field. Core code consumes LLMProvider and supports DeepSeek, a Chat Completions-compatible adapter and the organiser gateway's Ollama chat protocol; see [provider guide](llm-providers.md) for capability checks and verification status. These configuration changes do not change case/action wire formats.
 
 - New POST /api/v1/cases/{case_id}/runs accepts {expected_state_version} plus Idempotency-Key. It synchronously returns 200 RunRecord, including status and errors. This is case_analysis_requested, not case_activated, and does not send a request. GET /api/v1/runs/{run_id} and GET /api/v1/cases/{case_id}/review-tasks are now available.
 - POST /api/v1/runs/{run_id}/recover requires a manager and Idempotency-Key. It idempotently turns expired running or abandoned queued analysis into needs_review; active leases return 409. It does not replay inference or external effects.
