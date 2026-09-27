@@ -97,11 +97,13 @@ async function connectSession(){
   sessionStorage.setItem('closeready_token',state.token);
   await loadCases();
 }
-async function mutation(path,body,method='POST'){
+async function mutation(path,body,method='POST',{throwOnError=false}={}){
   if(state.busy)return;
   const pending=state.pending;
   if(pending && (pending.path!==path || pending.body!==body)){
-    notice('Resolve the previous uncertain request using Retry before making another change.');return;
+    const error=Error('Resolve the previous uncertain request using Retry before making another change.');
+    if(throwOnError)throw error;
+    notice(error.message);return;
   }
   const op=pending || {path,body,method,key:uid(),caseId:state.data?.caseData.case_id};
   state.pending=op;state.busy=true;
@@ -113,6 +115,7 @@ async function mutation(path,body,method='POST'){
     notice(result.associated===false?'Reply quarantined: sender requires review.':'Saved successfully.');
   }catch(e){
     if(e.status && e.status<500)state.pending=null;
+    if(throwOnError)throw e;
     notice(e.message+(state.pending?' Outcome uncertain. Retry uses the same request key.':''));
   }finally{
     state.busy=false;
@@ -145,20 +148,24 @@ function showPromptErrors(form,errors){
   }
   firstInvalid?.focus();
 }
-function promptFields(title,fields,{validate}={}){
+function promptFields(title,fields,{validate,submit}={}){
   return new Promise(resolve=>{
     const d=document.createElement('dialog');d.setAttribute('aria-label',title);
     d.innerHTML=`<h2>${esc(title)}</h2>${promptFormMarkup(fields)}`;
     document.body.append(d);
     const form=d.querySelector('form');
     let submittedValues=null;
-    form.addEventListener('submit',event=>{
+    form.addEventListener('submit',async event=>{
       event.preventDefault();
       const values=Object.fromEntries(new FormData(form));
       let errors={};
       try{errors=validate?.(values)||{}}catch(error){errors={_form:error.message}}
       if(Object.keys(errors).length){showPromptErrors(form,errors);return}
-      submittedValues=values;d.close('ok');
+      if(!submit){submittedValues=values;d.close('ok');return}
+      try{
+        submittedValues=await submit(values);
+        d.close('ok');
+      }catch(error){showPromptErrors(form,{_form:error.message})}
     });
     d.querySelector('[data-dialog-cancel]').addEventListener('click',()=>d.close('cancel'));
     d.addEventListener('close',()=>{const values=d.returnValue==='ok'?submittedValues:null;d.remove();resolve(values);},{once:true});
@@ -367,7 +374,7 @@ function caseFormErrors(values){
 
 async function createCaseForm(){
   if(!state.token){notice('Connect before creating a case.');return;}
-  const values=await promptFields('Create client-period checklist',[
+  const created=await promptFields('Create client-period checklist',[
     {name:'client',label:'Client ID'}, {name:'owner',label:'Manager user ID'},
     {name:'policy',label:'Approved policy ID'}, {name:'period',label:'Accounting period',type:'month'},
     {name:'timezone',label:'Business timezone',value:Intl.DateTimeFormat().resolvedOptions().timeZone},
@@ -378,9 +385,9 @@ async function createCaseForm(){
     {name:'receipts',label:'Required receipt references, comma-separated (optional)',optional:true},
     {name:'other',label:'Other supporting document description (optional)',optional:true},
     {name:'other_refs',label:'Required references for other documents (optional)',optional:true},
-  ],{validate:caseFormErrors});
-  if(!values)return;
-  const requirements=buildCaseRequirements(values);
-  const created=await mutation('/cases',{client_id:values.client,owner_user_id:values.owner,policy_id:values.policy,accounting_period:values.period,timezone:values.timezone,due_at:new Date(values.due).toISOString(),requirements});
+  ],{validate:caseFormErrors,submit:async values=>{
+    const requirements=buildCaseRequirements(values);
+    return mutation('/cases',{client_id:values.client,owner_user_id:values.owner,policy_id:values.policy,accounting_period:values.period,timezone:values.timezone,due_at:new Date(values.due).toISOString(),requirements},'POST',{throwOnError:true});
+  }});
   if(created)await loadCase(created.case_id);
 }

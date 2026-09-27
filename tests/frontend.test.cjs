@@ -141,6 +141,72 @@ test('prompt dialog keeps invalid values open and shows the field error',async()
   assert.deepEqual({...await result},{bank_accounts:'1234'});
 });
 
+test('new case dialog preserves entered values when the server rejects creation',async()=>{
+  const c=sandbox();
+  const formError={textContent:'',hidden:true};
+  const form={
+    values:{client:'client_lightsail_demo'},listeners:{},
+    addEventListener(name,handler){this.listeners[name]=handler},
+    querySelectorAll(){return []},
+    querySelector(selector){return selector==='[data-form-error]'?formError:null}
+  };
+  const cancel={addEventListener(){}};
+  const dialog={
+    returnValue:'',closeCalls:0,listeners:{},
+    setAttribute(){},set innerHTML(value){this.markup=value},
+    querySelector(selector){return selector==='form'?form:selector==='[data-dialog-cancel]'?cancel:null},
+    addEventListener(name,handler){this.listeners[name]=handler},
+    close(value){this.closeCalls+=1;this.returnValue=value;this.listeners.close?.()},
+    remove(){},showModal(){}
+  };
+  c.document={createElement:()=>dialog,body:{append(){}},querySelectorAll:()=>[]};
+  c.FormData=class{constructor(element){return new Map(Object.entries(element.values))}};
+  let attempts=0;
+
+  const result=run(c,`promptFields('Create case',[{name:'client',label:'Client ID'}],{
+    submit:async values=>{submitValues(values);if(++submitAttempts===1)throw Error('FORBIDDEN: action is not permitted for this actor');return {case_id:'case-created'}}
+  })`);
+  c.submitValues=values=>{assert.equal(values.client,'client_lightsail_demo')};
+  Object.defineProperty(c,'submitAttempts',{get:()=>attempts,set:value=>{attempts=value}});
+
+  await form.listeners.submit({preventDefault(){}});
+  assert.equal(dialog.closeCalls,0);
+  assert.equal(form.values.client,'client_lightsail_demo');
+  assert.equal(formError.hidden,false);
+  assert.equal(formError.textContent,'FORBIDDEN: action is not permitted for this actor');
+
+  await form.listeners.submit({preventDefault(){}});
+  assert.equal(dialog.closeCalls,1);
+  assert.deepEqual({...await result},{case_id:'case-created'});
+});
+
+test('new case sends the request before closing its dialog',async()=>{
+  const c=sandbox();
+  const values={
+    client:'client_demo',owner:'user_manager_demo',policy:'policy_demo',period:'2026-09',
+    timezone:'Asia/Singapore',due:'2026-09-30T12:00',entity:'entity_demo',
+    bank_accounts:'1234',invoices:'',receipts:'',other:'',other_refs:''
+  };
+  let request,loadedCase;
+  c.promptFields=async(title,fields,options)=>{
+    assert.equal(typeof options.submit,'function');
+    return options.submit(values);
+  };
+  c.mutation=async(path,body,method,options)=>{
+    request={path,body,method,options};
+    return {case_id:'case-created'};
+  };
+  c.loadCase=async caseId=>{loadedCase=caseId};
+  run(c,"state.token='manager-token'");
+
+  await run(c,'createCaseForm()');
+
+  assert.equal(request.path,'/cases');
+  assert.equal(request.options.throwOnError,true);
+  assert.equal(request.body.client_id,'client_demo');
+  assert.equal(loadedCase,'case-created');
+});
+
 test('new case validation attaches malformed bank account errors to that input',()=>{
   const c=sandbox();
   const errors=run(c,`caseFormErrors({
