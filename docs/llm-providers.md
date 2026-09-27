@@ -10,10 +10,10 @@ The API still requires CLOSEREADY_LLM_ENABLED=1 to enable inference. Set CLOSERE
 
 | Setting | Meaning |
 | --- | --- |
-| LLM_PROVIDER | deepseek or openai_compatible; defaults to deepseek for existing users |
+| LLM_PROVIDER | deepseek, openai_compatible or ollama_gateway; defaults to deepseek for existing users |
 | LLM_API_KEY | Credential for the selected endpoint |
 | LLM_MODEL | Exact model identifier supplied by that service |
-| LLM_BASE_URL | Base URL; the adapter appends /chat/completions |
+| LLM_BASE_URL | Provider base URL; Chat Completions adapters append `/chat/completions`, while `ollama_gateway` appends `/api/chat` |
 | LLM_TIMEOUT_SECONDS | Integer 1..30; default 30 |
 | LLM_MAX_OUTPUT_TOKENS | Integer 1..4096; default 1200 |
 | LLM_OUTPUT_TOKEN_FIELD | max_tokens (default), or max_completion_tokens for the compatible adapter |
@@ -40,6 +40,20 @@ The example domain is a placeholder, not a working service. `LLM_BASE_URL` is a 
 
 The compatible adapter sends Bearer authentication, model, messages, tools, stream=false and the configured output-limit field. It omits DeepSeek's thinking parameter. It expects native function tool calls, correlated role=tool messages and a Chat Completions response shape. It does not translate every vendor's native API, implement cloud request signing, streaming, vision inputs or provider-specific reasoning continuation blocks. Use a provider mode supporting this non-streaming tool conversation, or implement a dedicated adapter.
 
+### NUS-ISS organiser gateway
+
+The organiser gateway exposes Ollama's chat protocol rather than OpenAI Chat Completions. Configure it explicitly; do not select `openai_compatible` for this endpoint:
+
+```dotenv
+LLM_PROVIDER=ollama_gateway
+LLM_API_KEY=your-team-key
+LLM_MODEL=global.anthropic.claude-sonnet-4-5-20250929-v1:0
+LLM_BASE_URL=https://api.softwaresystems.app
+LLM_OUTPUT_TOKEN_FIELD=max_tokens
+```
+
+This adapter posts to `/api/chat`, authenticates with `X-API-Key`, translates canonical assistant/tool-result messages to Ollama messages, and converts Ollama tool calls back into the canonical runtime format. `LLM_MAX_OUTPUT_TOKENS` becomes Ollama `options.num_predict`; `LLM_OUTPUT_TOKEN_FIELD` must remain `max_tokens`. A direct synthetic request on 2026-09-27 confirmed that the public gateway returned a structured first-turn `message.tool_calls`; run the shared two-request check below in each deployed environment to verify the full tool-result round trip.
+
 Endpoints must use HTTPS and cannot contain embedded username/password, query credentials or fragments. Redirects are refused. Unlike the DeepSeek adapter, the compatible adapter accepts the hostname explicitly configured by the server administrator; it is not an HTTP/model-controlled URL. This is an intentional extension for team-owned services, not a general-purpose network tool. Limit deployment egress to your selected service when provisioning the server.
 
 ## Two levels of verification
@@ -60,7 +74,7 @@ Then verify the actual application schemas and persistence path:
 
 This uses the same configured factory and full case-analysis gate. A basic tool check passing does not prove support for the application's nested/discriminated schema or model decision quality. The case check writes synthetic data under ignored local-data and records provider/model with the result. Review its result before using a new service for integration.
 
-Verified in this workspace: DeepSeek passed the live case-analysis check earlier, and the refactored shared factory/native-tool check passed on 2026-09-10 with deepseek-flash (two requests, 720 reported total tokens). The compatible adapter has deterministic request/configuration tests; no other provider account has been live-tested. Do not advertise untested services as verified.
+Verified in this workspace: DeepSeek passed the live case-analysis check earlier, and the refactored shared factory/native-tool check passed on 2026-09-10 with deepseek-flash (two requests, 720 reported total tokens). On 2026-09-27 the organiser gateway returned a structured native tool call from a direct first-turn probe. Its full tool-result round trip and business-runtime path remain unverified until the deployed shared checks pass. The compatible and organiser adapters have deterministic request/configuration tests. Do not advertise an incomplete probe as full verification.
 
 The original scripts/deepseek_probe.py remains a legacy DeepSeek-only diagnostic. Prefer the shared check for new team configurations.
 

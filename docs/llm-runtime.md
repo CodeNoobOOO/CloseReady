@@ -10,7 +10,7 @@ Student 1 owns the provider adapter and bounded tool loop. Student 2 supplies ex
 
 ## Configuration and provider adapter
 
-Implemented provider selection and extension instructions are in [LLM providers](llm-providers.md). The runtime depends on LLMProvider; startup chooses deepseek (legacy default) or openai_compatible. Only DeepSeek has live verification in this workspace so far. Canonical business contracts and execution gates are shared across adapters.
+Implemented provider selection and extension instructions are in [LLM providers](llm-providers.md). The runtime depends on LLMProvider; startup chooses deepseek (legacy default), openai_compatible or ollama_gateway. DeepSeek has a recorded full live check; the organiser gateway has a recorded first-turn native-tool probe and still requires the shared full round-trip check after deployment. Canonical business contracts and execution gates are shared across adapters.
 
 Separate runtime environment (development/test/pilot), agent mode (single/multi), LLM backend (live/mock) and mail backend (provider/test_sink). Multi-agent is not synonymous with live operation. Pilot startup must refuse mock inference or a test-only mail sink; missing credentials must fail explicitly, never silently load fixture responses.
 
