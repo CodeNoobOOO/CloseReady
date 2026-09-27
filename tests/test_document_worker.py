@@ -967,6 +967,57 @@ class DocumentWorkerTests(unittest.TestCase):
             )
         )
 
+    def test_analysis_evidence_matches_table_label_and_value_in_page_order(self):
+        extraction = extracted(
+            text=(
+                "ACCOUNT HOLDER\n"
+                "ACCOUNT NUMBER\n"
+                "PERIOD COVERED\n"
+                "entity_demo\n"
+                "XXXX-XXXX-1234\n"
+                "September 1, 2026 through September 30, 2026"
+            )
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="entity_name",
+                    page=1,
+                    excerpt="ACCOUNT HOLDER\nentity_demo",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_rejects_table_segments_in_wrong_order(self):
+        extraction = extracted(
+            text="ACCOUNT HOLDER\nACCOUNT NUMBER\nentity_demo\nXXXX-XXXX-1234"
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="entity_name",
+                    page=1,
+                    excerpt="entity_demo\nACCOUNT HOLDER",
+                )
+            ]
+        )
+
+        self.assertFalse(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
     def test_analysis_evidence_rejects_invalid_page(self):
         extraction = extracted(
             text="Account ending in 1234"
