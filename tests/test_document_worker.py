@@ -919,6 +919,54 @@ class DocumentWorkerTests(unittest.TestCase):
             )
         )
 
+    def test_analysis_evidence_matches_pdf_line_wrapping(self):
+        extraction = extracted(
+            text=(
+                "This statement covers September 1, 2026 through\n"
+                "September 30, 2026, inclusive."
+            )
+        )
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="coverage",
+                    page=1,
+                    excerpt=(
+                        "This statement covers September 1, 2026 through "
+                        "September 30, 2026, inclusive."
+                    ),
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
+    def test_analysis_evidence_matches_equivalent_unicode_text(self):
+        extraction = extracted(text="ACCOUNT NUMBER: １２３４")
+
+        analysis = LLMDocumentAnalysis(
+            evidence=[
+                LLMDocumentEvidence(
+                    field="account_identifier",
+                    page=1,
+                    excerpt="ACCOUNT NUMBER: 1234",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validate_analysis_evidence(
+                extraction,
+                analysis,
+            )
+        )
+
     def test_analysis_evidence_rejects_invalid_page(self):
         extraction = extracted(
             text="Account ending in 1234"

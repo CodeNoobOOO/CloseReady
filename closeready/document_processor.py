@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import unicodedata
 
 
 from .document_assessment import (
@@ -91,7 +92,10 @@ def validate_analysis_evidence(
     extraction: DocumentExtraction,
     analysis: LLMDocumentAnalysis,
 ) -> bool:
-    pages = {page.page: page.text for page in extraction.pages}
+    pages = {
+        page.page: " ".join(unicodedata.normalize("NFKC", page.text).split())
+        for page in extraction.pages
+    }
 
     for evidence in analysis.evidence:
         page_text = pages.get(evidence.page)
@@ -99,7 +103,10 @@ def validate_analysis_evidence(
         if page_text is None:
             return False
 
-        if evidence.excerpt not in page_text:
+        excerpt = " ".join(
+            unicodedata.normalize("NFKC", evidence.excerpt).split()
+        )
+        if excerpt not in page_text:
             return False
 
     return True
