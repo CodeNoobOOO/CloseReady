@@ -3,7 +3,7 @@ import re
 from typing import Annotated
 from pydantic import Field, model_validator
 from .models import (
-    CaseSnapshot, CompletionRule, ContractModel, DocumentType, Period,
+    CaseSnapshot, CaseTitle, CompletionRule, ContractModel, DocumentType, Period,
     PositiveInt, Requirement, RequirementScope, Text, Timestamp, TimezoneName,
 )
 
@@ -53,6 +53,7 @@ class RequirementDefinition(ContractModel):
 
 
 class CreateCaseRequest(ContractModel):
+    title: CaseTitle
     client_id: Text
     accounting_period: Period
     timezone: TimezoneName

@@ -85,6 +85,7 @@ $promisedAt = [DateTimeOffset]::new(
 ).AddDays(1)
 
 $caseBody = @{
+    title = 'July close - operating account'
     client_id = 'client_demo'
     accounting_period = '2026-07'
     timezone = 'Asia/Singapore'

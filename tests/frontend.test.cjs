@@ -183,7 +183,7 @@ test('new case dialog preserves entered values when the server rejects creation'
 test('new case sends the request before closing its dialog',async()=>{
   const c=sandbox();
   const values={
-    client:'client_demo',owner:'user_manager_demo',policy:'policy_demo',period:'2026-09',
+    title:'September close',client:'client_demo',owner:'user_manager_demo',policy:'policy_demo',period:'2026-09',
     timezone:'Asia/Singapore',due:'2026-09-30T12:00',entity:'entity_demo',
     bank_accounts:'1234',invoices:'',receipts:'',other:'',other_refs:''
   };
@@ -203,23 +203,58 @@ test('new case sends the request before closing its dialog',async()=>{
 
   assert.equal(request.path,'/cases');
   assert.equal(request.options.throwOnError,true);
+  assert.equal(request.body.title,'September close');
   assert.equal(request.body.client_id,'client_demo');
   assert.equal(loadedCase,'case-created');
+});
+
+test('case list and details prefer the manager title with a legacy fallback',async()=>{
+  const c=sandbox();
+  c.pages=async()=>[
+    {case_id:'case-new',title:'September operating close',client_id:'client_demo',accounting_period:'2026-09',readiness_status:'collecting'},
+    {case_id:'case-old',client_id:'legacy_client',accounting_period:'2026-08',readiness_status:'collecting'}
+  ];
+  run(c,"state.token='manager-token'");
+
+  await run(c,'loadCases()');
+
+  const list=run(c,"$('cases').innerHTML");
+  assert.match(list,/<b>September operating close<\/b>/);
+  assert.match(list,/client_demo · 2026-09/);
+  assert.match(list,/<b>legacy_client · 2026-08<\/b>/);
+
+  run(c,`state.data=${JSON.stringify({
+    caseData:{case_id:'case-new',title:'September operating close',client_id:'client_demo',accounting_period:'2026-09',state_version:1,owner_user_id:'manager',due_at:'2026-09-30T00:00:00Z',readiness_status:'collecting',requirements:[]},
+    reviews:[],outbox:[],audit:[],findings:[],commitments:[],reminders:[],replies:[],mailbox:{items:[]},runs:[],documents:[],reference:{}
+  })}`);
+  run(c,'render()');
+  const detail=run(c,"$('workspace').innerHTML");
+  assert.match(detail,/<h1>September operating close<\/h1>/);
+  assert.match(detail,/client_demo · 2026-09/);
 });
 
 test('new case validation attaches malformed bank account errors to that input',()=>{
   const c=sandbox();
   const errors=run(c,`caseFormErrors({
-    period:'2026-09',entity:'entity_demo',bank_accounts:'12345',
+    title:'September close',period:'2026-09',entity:'entity_demo',bank_accounts:'12345',
     invoices:'',receipts:'',other:'',other_refs:''
   })`);
   assert.deepEqual({...errors},{bank_accounts:'Each bank account entry must be four digits or a label followed by four digits, for example operating:1234.'});
 });
 
+test('new case validation attaches title errors to the title input',()=>{
+  const c=sandbox();
+  const base={period:'2026-09',entity:'entity_demo',bank_accounts:'1234',invoices:'',receipts:'',other:'',other_refs:''};
+  assert.deepEqual({...run(c,`caseFormErrors(${JSON.stringify({...base,title:'   '})})`)},
+    {title:'Enter a case title.'});
+  assert.deepEqual({...run(c,`caseFormErrors(${JSON.stringify({...base,title:'x'.repeat(121)})})`)},
+    {title:'Case title must be 120 characters or fewer.'});
+});
+
 test('bank account is optional when another document requirement is configured',()=>{
   const c=sandbox();
   const errors=run(c,`caseFormErrors({
-    period:'2026-09',entity:'entity_demo',bank_accounts:'',
+    title:'September close',period:'2026-09',entity:'entity_demo',bank_accounts:'',
     invoices:'INV-001',receipts:'',other:'',other_refs:''
   })`);
   assert.deepEqual({...errors},{});

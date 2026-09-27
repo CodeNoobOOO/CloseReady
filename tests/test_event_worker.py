@@ -42,6 +42,7 @@ def access_config():
 
 def case_request():
     return {
+        'title': 'July close - event worker test',
         'client_id': 'client_demo',
         'accounting_period': '2026-07',
         'timezone': 'Asia/Singapore',
