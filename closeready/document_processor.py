@@ -28,6 +28,32 @@ class RequirementResolution:
     candidate_requirement_ids: tuple[str, ...]
 
 
+def _normalize_evidence_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _evidence_excerpt_matches(page_text: str, excerpt: str) -> bool:
+    normalized_excerpt = _normalize_evidence_text(excerpt)
+    if normalized_excerpt in page_text:
+        return True
+
+    segments = [
+        _normalize_evidence_text(line)
+        for line in excerpt.splitlines()
+        if line.strip()
+    ]
+    if len(segments) < 2:
+        return False
+
+    position = 0
+    for segment in segments:
+        match_position = page_text.find(segment, position)
+        if match_position < 0:
+            return False
+        position = match_position + len(segment)
+    return True
+
+
 def _matches_structured_analysis(requirement, analysis: LLMDocumentAnalysis) -> bool:
     if analysis.detected_type != requirement.document_type:
         return False
@@ -93,7 +119,7 @@ def validate_analysis_evidence(
     analysis: LLMDocumentAnalysis,
 ) -> bool:
     pages = {
-        page.page: " ".join(unicodedata.normalize("NFKC", page.text).split())
+        page.page: _normalize_evidence_text(page.text)
         for page in extraction.pages
     }
 
@@ -103,10 +129,7 @@ def validate_analysis_evidence(
         if page_text is None:
             return False
 
-        excerpt = " ".join(
-            unicodedata.normalize("NFKC", evidence.excerpt).split()
-        )
-        if excerpt not in page_text:
+        if not _evidence_excerpt_matches(page_text, evidence.excerpt):
             return False
 
     return True
